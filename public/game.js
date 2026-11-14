@@ -470,8 +470,12 @@
       ctx.strokeStyle = TEAM[i].color; ctx.lineWidth = 1.5; ctx.stroke();
       if (f < end) {
         ctx.fillStyle = '#000';
-        if (y < 0) {                       // off the top of the screen: show a marker
-          ctx.beginPath(); ctx.moveTo(x, 2); ctx.lineTo(x - 5, 11); ctx.lineTo(x + 5, 11); ctx.fill();
+        if (x < 0 || x > W || y < 0) {     // out of frame: a triangle on the nearest edge tracks the ball along it
+          const mx = Math.min(Math.max(x, 11), W - 11), my = Math.min(Math.max(y, 11), H - 11);
+          ctx.save();
+          ctx.translate(mx, my); ctx.rotate(Math.atan2(y - my, x - mx));
+          ctx.beginPath(); ctx.moveTo(9, 0); ctx.lineTo(-2, -5); ctx.lineTo(-2, 5); ctx.fill();
+          ctx.restore();
         } else {
           ctx.beginPath(); ctx.arc(x, y, 3, 0, 7); ctx.fill();
         }

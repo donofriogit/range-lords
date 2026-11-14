@@ -59,6 +59,10 @@
   .dialog h2 { margin: 0; font-size: calc(16px * var(--u)); white-space: pre-line; }
   .dialog p { margin: 0; line-height: 1.4; }
   .dialog .small { font-size: calc(10px * var(--u)); color: #555; }
+  .dialog.title { max-width: calc(620px * var(--u)); padding: calc(10px * var(--u)) calc(12px * var(--u)) calc(12px * var(--u)); gap: calc(8px * var(--u)); }
+  .dialog .art { display: block; width: 100%; height: auto; border: 2px solid #000; }
+  .dialog .blurb { font-size: calc(11px * var(--u)); }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .dialog button { height: calc(22px * var(--u)); padding: 0 calc(16px * var(--u)); border: 2px solid #000; border-radius: calc(9px * var(--u)); background: #fff; font-weight: bold; cursor: pointer; }
   .dialog button:hover:not(:disabled) { background: #000; color: #fff; }
   .dialog button:disabled { color: #888; border-color: #888; cursor: default; }
@@ -82,9 +86,10 @@
         </form>
 
         <div id="lobby" class="overlay">
-          <div class="dialog">
-            <h2>Range Lords</h2>
-            <p>Both players aim, then hit Fire. When both have fired, both cannons shoot at once. One hit on the enemy keep wins the round. First to 4 rounds wins the match (best of 7).</p>
+          <div class="dialog title">
+            <img class="art" src="title.jpg" alt="RANGE LORDS: 256 GRAINS - armored lords, castles on opposing hills, and a cannon at sunset">
+            <h2 class="sr-only">RANGE LORDS: 256 GRAINS</h2>
+            <p class="blurb">Both players aim, then hit Fire. When both have fired, both cannons shoot at once. One hit on the enemy keep wins the round. First to 4 rounds wins the match (best of 7).</p>
             <div id="lobbyMenu" style="display:flex; flex-direction:column; align-items:center; gap:calc(10px * var(--u));">
               <div class="row">
                 <button id="createBtn">Create game</button>
