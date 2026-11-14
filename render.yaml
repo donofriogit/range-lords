@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: range-lords
+    runtime: python
+    plan: free
+    buildCommand: echo "nothing to build"
+    startCommand: python3 server.py
+    envVars:
+      - key: TRUST_PROXY
+        value: "1"
