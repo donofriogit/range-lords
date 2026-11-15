@@ -368,6 +368,15 @@ def client_ip(writer, headers):
     return str(addr)
 
 
+def same_origin(origin, host):
+    """A browser tags every websocket handshake with the site the page came from. Only accept our own site, so a page
+    on some other website cannot open connections to this server from its visitors' browsers."""
+    try:
+        return urlsplit(origin).netloc.lower() == host.lower()
+    except ValueError:
+        return False
+
+
 def note_limit(ip, what):
     now = time.monotonic()
     if now - _last_logged.get((ip, what), -1e9) > 30:
@@ -683,7 +692,7 @@ PUBLIC = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)
 
 def http_response(status, body=b"", ctype="text/plain; charset=utf-8", extra=""):
     reason = {200: "OK", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed",
-              429: "Too Many Requests", 503: "Service Unavailable"}[status]
+              403: "Forbidden", 429: "Too Many Requests", 503: "Service Unavailable"}[status]
     head = (f"HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\n"
             f"Content-Length: {len(body)}\r\nConnection: close\r\n{extra}\r\n")
     return head.encode() + body
@@ -730,6 +739,11 @@ async def handle_connection(reader, writer):
         info = ip_info(ip)
 
         if headers.get("upgrade", "").lower() == "websocket" and "sec-websocket-key" in headers:
+            origin = headers.get("origin")      # absent for non-browser clients, which are not the concern here
+            if origin is not None and not same_origin(origin, headers.get("host", "")):
+                note_limit(ip, f"foreign origin {origin[:60]}")
+                writer.write(http_response(403, b"Origin not allowed"))
+                return
             if not info.ws.take() or (LIMITS_ON and info.conns >= MAX_CONNS_PER_IP):
                 note_limit(ip, "websocket connections")
                 writer.write(http_response(429, b"Too many connections", extra="Retry-After: 10\r\n"))
