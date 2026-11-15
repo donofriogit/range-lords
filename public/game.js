@@ -1,14 +1,17 @@
 (() => {
   const W = 1000, H = 650, B = 10;
   const TEAM = [{ name: 'Blue', color: '#2a58d8' }, { name: 'Red', color: '#d82a2a' }];
-  const nameOf = (i) => (i === 1 && vsComputer ? 'Computer' : TEAM[i].name);
   const FONT = 'Chicago, Geneva, "Lucida Grande", sans-serif';
   const MAX_POWDER = 256, MIN_POWDER = 10, DEFAULT_AIM = { angle: 60, power: 192 };
   const ICON_H = 46;
+  const REPLAY_SPEED = 3;                      // replays run this many times faster than the live slow motion
 
   const $ = (id) => document.getElementById(id);
   const canvas = $('c'), ctx = canvas.getContext('2d');
   const icons = $('icons'), ictx = icons.getContext('2d');
+
+  let mode = 'online';                         // 'online' | 'computer' | 'local' (two people, one screen)
+  const nameOf = (i) => (i === 1 && mode === 'computer' ? 'Computer' : TEAM[i].name);
 
   let ws = null;
   let you = null, state = null;
@@ -20,20 +23,26 @@
   let particles = [], shake = 0;
   let debris = [], rubble = [];                // flying chunks, and chunks that have come to rest this round
   let windVis = 0;                             // smoothed wind used to push clouds, flags and the wind vane
-  let windMode = 'constant', windLocked = false, closedByServer = false;
+  let windMode = 'constant', optionsLocked = false, closedByServer = false;
   let scale = 1.2;                             // backing-store pixels per world unit
   const aim = [{ ...DEFAULT_AIM }, { ...DEFAULT_AIM }];
   let hist = [[], []];                         // shots each player has fired, oldest first
   let chatMsgs = [];                           // recent chat lines, drawn as plain text in the green under your castle
-  let vsComputer = false;
+  let localSeat = 0, maskedSeat = -1;          // local game: whose turn to aim, and whose dials are hidden after locking in
+  let roundStart = null, roundVolleys = [];    // recording of the round in progress
+  let lastRound = null;                        // the last finished round, for replays
+  let replaying = null, replayPressed = false, oppReplay = false;
   const clouds = Array.from({ length: 6 }, (_, i) => ({ x: i * 180, y: 30 + (i * 47) % 110, s: 0.7 + (i % 3) * 0.3 }));
 
-  // Hill shown behind the menu dialog before a game starts.
+  // Hill shown behind the game window before a game starts.
   const demoTerrain = Array.from({ length: 201 }, (_, i) => {
     const x = i * 5, d = (x - 500) / 350;
     const bump = Math.abs(d) < 1 ? 330 * 0.5 * (1 + Math.cos(Math.PI * d)) : 0;
     return 525 - bump;
   });
+
+  // The seat whose dials the controls drive right now.
+  const me = () => (mode === 'local' ? localSeat : you);
 
   // ---------------------------------------------------------------- sizing
 
@@ -72,30 +81,41 @@
   const send = (obj) => ws && ws.readyState === 1 && ws.send(JSON.stringify(obj));
   const show = (id) => $(id).classList.remove('hidden');
   const hide = (id) => $(id).classList.add('hidden');
-  function showLobbyMenu() { show('lobbyMenu'); hide('waiting'); lockWind(false); }
+  function showLobbyMenu() { show('lobbyMenu'); hide('waiting'); lockOptions(false); }
 
   function onMessage(m) {
     switch (m.type) {
       case 'created':
         hide('lobbyMenu'); show('waiting');
         $('code').textContent = m.code;
+        $('windLocked').textContent = `${windMode === 'constant' ? 'Constant' : 'Variable'} wind - best of ${$('bestOf').value}`;
         break;
       case 'start':
-        you = m.you; state = m.state; score = m.score; round = m.round; target = m.target; vsComputer = !!m.vsComputer;
-        applyWindMode(m.windMode); lockWind(true);
+        resetReplay();
+        you = m.you; state = m.state; score = m.score; round = m.round; target = m.target; mode = m.mode;
+        applyWindMode(m.windMode); $('bestOf').value = String(m.target * 2 - 1); lockOptions(true);
         firedMe = oppFired = false; vol = null; roundEnded = false; over = false; seriesWinner = null;
         banner = ''; trails = []; particles = []; debris = []; rubble = [];
-        if (round === 1) { aim[0] = { ...DEFAULT_AIM }; aim[1] = { ...DEFAULT_AIM }; hist = [[], []]; chatMsgs = []; }
+        localSeat = 0; maskedSeat = -1; replayPressed = oppReplay = false;
+        roundStart = JSON.parse(JSON.stringify(m.state)); roundVolleys = [];
+        if (round === 1) { aim[0] = { ...DEFAULT_AIM }; aim[1] = { ...DEFAULT_AIM }; hist = [[], []]; chatMsgs = []; lastRound = null; }
         windVis = state.wind;
-        hide('lobby'); hide('gameover');
-        showChat(!vsComputer);
+        hide('lobby'); hide('gameover'); document.body.classList.remove('menu');
+        showChat(mode === 'online');
         syncControls();
         break;
       case 'fired':
-        if (m.player !== you) oppFired = true;
+        if (mode === 'online' && m.player !== you) oppFired = true;
         break;
       case 'volley':
         startVolley(m);
+        break;
+      case 'replay_wait':
+        oppReplay = true;
+        syncControls();
+        break;
+      case 'replay_go':
+        startReplay();
         break;
       case 'chat':
         chatMsgs.push({ player: m.player, text: m.text, born: performance.now() });
@@ -128,16 +148,37 @@
     return { x: c.x0 + c.keepCol * B + B / 2, y: c.baseY - c.grid[c.keepCol].length * B - 4 };
   };
 
-  function startVolley(m) {
-    vol = { m, t: 0, applied: 0 };
+  function startVolley(m, isReplay = false) {
+    vol = { m, t: 0, applied: 0, replay: isReplay };
     stopHold();
+    if (!isReplay) {
+      replayPressed = oppReplay = false;
+      roundVolleys.push(m);
+      localSeat = 0; maskedSeat = -1;
+    }
     m.shots.forEach((s, i) => {
       aim[i] = { angle: s.angle, power: s.power };
-      hist[i].push({ angle: s.angle, power: s.power });
+      if (!isReplay) hist[i].push({ angle: s.angle, power: s.power });
       const c = cannonPos(i);
       for (let k = 0; k < 12; k++) addParticle(c.x, c.y, (i ? -1 : 1) * (30 + Math.random() * 90), -Math.random() * 70, '#888', 2 + Math.random() * 2, 0.5);
     });
     syncControls();
+  }
+
+  // Swap in new castle grids; every block that vanished throws a couple of stone chunks, so a collapse is visible.
+  function applyGrids(grids) {
+    grids.forEach((g, i) => {
+      const c = state.castles[i];
+      c.grid.forEach((col, ci) => {
+        for (let r = g[ci].length; r < col.length; r++) {
+          for (let k = 0; k < 2; k++) {
+            debris.push({ x: c.x0 + ci * B + Math.random() * B, y: c.baseY - (r + 0.5) * B, vx: (Math.random() - 0.5) * 170,
+              vy: -40 - Math.random() * 160, size: 2 + Math.floor(Math.random() * 3), stone: true });
+          }
+        }
+      });
+      c.grid = g;
+    });
   }
 
   function stepVolley(dt) {
@@ -146,24 +187,29 @@
     const m = vol.m, f = vol.t * m.rate;
     while (vol.applied < m.events.length && m.events[vol.applied].t <= f) {
       const e = m.events[vol.applied++];
-      e.castles.forEach((g, i) => { state.castles[i].grid = g; });
+      applyGrids(e.castles);
       explosion(e.impact[0], e.impact[1]);
     }
     if (f >= Math.max(...m.shots.map((s) => s.path.length)) + 4) finishVolley();
   }
 
   function finishVolley() {
-    const m = vol.m;
+    const m = vol.m, isReplay = vol.replay;
     m.castles.forEach((g, i) => { state.castles[i].grid = g; });
     state.wind = m.wind;
-    score = m.score;
     m.shots.forEach((s, i) => trails.push({ path: s.path, player: i }));
     trails = trails.slice(-6);
-    vol = null; firedMe = oppFired = false;
+    vol = null;
+    if (isReplay) { replayAdvance(); return; }
+    score = m.score;
+    firedMe = oppFired = false;
     if (m.roundWinner !== null) {
       roundEnded = true;
-      banner = m.roundWinner === -1 ? 'Both keeps fell - draw! Replaying the round...'
-        : (m.roundWinner === you ? 'You win the round!' : `${vsComputer ? 'Computer' : 'Opponent'} wins the round!`);
+      lastRound = { start: roundStart, volleys: roundVolleys, round };
+      const w = m.roundWinner;
+      banner = w === -1 ? 'Both castles fell - draw! The round restarts...'
+        : mode === 'local' ? `${TEAM[w].name} wins the round!`
+        : w === you ? 'You win the round!' : `${mode === 'computer' ? 'Computer' : 'Opponent'} wins the round!`;
     }
     if (m.seriesWinner !== null) {
       over = true; seriesWinner = m.seriesWinner;
@@ -173,10 +219,64 @@
   }
 
   function showGameOver() {
-    $('goText').textContent = `${seriesWinner === you ? 'Victory!' : 'Defeat'}\n${score[you]} - ${score[1 - you]}`;
+    const local = mode === 'local';
+    const headline = local ? `${TEAM[seriesWinner].name} wins the match!` : seriesWinner === you ? 'Victory!' : 'Defeat';
+    const [a, b] = local ? [score[0], score[1]] : [score[you], score[1 - you]];
+    $('goText').textContent = `${headline}\n${a} - ${b}`;
     $('rematchBtn').disabled = false;
+    syncControls();
     show('gameover');
   }
+
+  // ---------------------------------------------------------------- replay
+
+  // Replays rebuild the last round from its recorded start and re-run every volley at REPLAY_SPEED.
+  function startReplay() {
+    if (!lastRound || vol || replaying) return;
+    replayPressed = oppReplay = false;
+    hide('gameover');
+    replaying = { k: 0, timer: null, saved: { state, trails, rubble, debris, banner, windVis, aim: [{ ...aim[0] }, { ...aim[1] }] } };
+    state = JSON.parse(JSON.stringify(lastRound.start));
+    trails = []; rubble = []; debris = []; particles = []; banner = ''; windVis = state.wind;
+    playReplayVolley();
+  }
+
+  function playReplayVolley() {
+    const v = lastRound.volleys[replaying.k];
+    startVolley({ ...v, rate: v.rate * REPLAY_SPEED }, true);
+  }
+
+  function replayAdvance() {
+    replaying.k += 1;
+    const more = replaying.k < lastRound.volleys.length;
+    replaying.timer = setTimeout(more ? playReplayVolley : endReplay, more ? 600 : 1800);
+    syncControls();
+  }
+
+  function restoreAfterReplay() {
+    const s = replaying.saved;
+    clearTimeout(replaying.timer);
+    replaying = null; vol = null; particles = [];
+    state = s.state; trails = s.trails; rubble = s.rubble; debris = s.debris; banner = s.banner; windVis = s.windVis;
+    aim[0] = s.aim[0]; aim[1] = s.aim[1];
+  }
+
+  function endReplay() {
+    restoreAfterReplay();
+    if (over) showGameOver();
+    syncControls();
+  }
+
+  function resetReplay() { if (replaying) restoreAfterReplay(); }
+
+  function requestReplay() {
+    if (!canReplay()) return;
+    replayPressed = true;
+    send({ type: 'replay' });
+    syncControls();
+  }
+
+  // ---------------------------------------------------------------- effects
 
   function addParticle(x, y, vx, vy, color, size, life) {
     particles.push({ x, y, vx, vy, color, size, life, max: life });
@@ -252,45 +352,72 @@
 
   // ---------------------------------------------------------------- controls
 
-  const canAim = () => !!state && !over && !roundEnded && !vol && !firedMe;
+  const canAim = () => !!state && !over && !roundEnded && !vol && !replaying && !firedMe;
+  const canReplay = () => !!lastRound && !!state && !vol && !replaying && !firedMe && !oppFired && !replayPressed
+    && (over || !roundEnded) && maskedSeat < 0;
   const setText = (id, t) => { const el = $(id); if (el.textContent !== String(t)) el.textContent = t; };
 
   function syncControls() {
+    const act = me(), local = mode === 'local';
     for (const i of [0, 1]) {
-      setText('ang' + i, Math.round(aim[i].angle) + '°');
-      setText('pow' + i, Math.round(aim[i].power) + 'g');
+      const masked = local && maskedSeat === i;     // a locked-in shot stays secret on a shared screen
+      setText('ang' + i, masked ? '--' : Math.round(aim[i].angle) + '°');
+      setText('pow' + i, masked ? '--' : Math.round(aim[i].power) + 'g');
       setText('sc' + i, score[i]);
-      $('side' + i).classList.toggle('theirs', i !== you);
-      setText('pname' + i, nameOf(i) + (i === you ? ' (you)' : ''));
-      // Tiny reminder of an earlier shot. Yours: the shot you last fired. Opponent's main field already
+      $('side' + i).classList.toggle('theirs', i !== act);
+      setText('pname' + i, nameOf(i) + (local ? (state && i === act && canAim() ? ' (aiming)' : '') : (i === you ? ' (you)' : '')));
+      // Tiny reminder of an earlier shot. Yours: the shot you last fired. Online, the opponent's main field already
       // shows their last shot, so theirs is the one before it.
-      const p = hist[i][hist[i].length - (i === you ? 1 : 2)];
+      let p = null;
+      if (local) { if (i === act && !masked) p = hist[i][hist[i].length - 1]; }
+      else p = hist[i][hist[i].length - (i === you ? 1 : 2)];
       setText('pa' + i, p ? `prev ${Math.round(p.angle)}°` : '');
       setText('pp' + i, p ? `prev ${Math.round(p.power)}g` : '');
     }
     const on = canAim();
     document.querySelectorAll('.arr').forEach((b) => { b.disabled = !on; });
     $('fireBtn').disabled = !on;
-    setText('fireBtn', firedMe ? 'Locked in' : 'Fire');
+    let label = firedMe ? 'Locked in' : 'Fire';
+    if (local && state && !firedMe) label = localSeat === 0 ? 'Blue: Lock in' : 'Red: Fire';
+    setText('fireBtn', label);
+    const rp = canReplay();
+    $('replayBtn').disabled = !rp;
+    setText('replayBtn', replayPressed ? 'Waiting...' : (oppReplay && rp ? 'Join replay' : 'Replay'));
+    $('replayBtn2').disabled = !rp;
   }
 
   function setAim(angle, power) {
     if (!canAim()) { stopHold(); return; }
-    aim[you] = { angle: Math.min(85, Math.max(5, angle)), power: Math.min(MAX_POWDER, Math.max(MIN_POWDER, power)) };
+    aim[me()] = { angle: Math.min(85, Math.max(5, angle)), power: Math.min(MAX_POWDER, Math.max(MIN_POWDER, power)) };
     syncControls();
   }
 
   function doFire() {
     if (!canAim()) return;
-    send({ type: 'fire', angle: aim[you].angle, power: aim[you].power });
-    firedMe = true;
+    const seat = me(), a = aim[seat];
+    if (mode === 'local') {
+      send({ type: 'fire', seat, angle: a.angle, power: a.power });
+      if (seat === 0) {
+        // Blue is locked in: hide the numbers (and barrel) behind the last public shot until the volley.
+        const pub = hist[0][hist[0].length - 1] || DEFAULT_AIM;
+        aim[0] = { angle: pub.angle, power: pub.power };
+        maskedSeat = 0; localSeat = 1;
+      } else {
+        firedMe = true;
+      }
+    } else {
+      send({ type: 'fire', angle: a.angle, power: a.power });
+      firedMe = true;
+    }
     stopHold();
     syncControls();
   }
 
-  const nudge = (kind, d) => (kind === 'angle'
-    ? setAim(aim[you].angle + d, aim[you].power)
-    : setAim(aim[you].angle, aim[you].power + d));
+  const nudge = (kind, d) => {
+    const a = aim[me()];
+    if (!a) return;
+    if (kind === 'angle') setAim(a.angle + d, a.power); else setAim(a.angle, a.power + d);
+  };
 
   let holdDelay = null, holdRepeat = null;
   function stopHold() { clearTimeout(holdDelay); clearInterval(holdRepeat); holdDelay = holdRepeat = null; }
@@ -308,6 +435,8 @@
   });
 
   $('fireBtn').addEventListener('click', doFire);
+  $('replayBtn').addEventListener('click', requestReplay);
+  $('replayBtn2').addEventListener('click', requestReplay);
   window.addEventListener('keydown', (e) => {
     if (!state || document.activeElement.tagName === 'INPUT') return;
     const k = e.key;
@@ -320,34 +449,35 @@
     e.preventDefault();
   });
 
-  // Wind behaviour is chosen in the opening dialog and locked once a game exists.
-  function applyWindMode(mode) {
-    if (mode !== 'variable' && mode !== 'constant') return;
-    windMode = mode;
-    $('windSelect').value = mode;
-    $('windLocked').textContent = mode === 'constant' ? 'Constant wind' : 'Variable wind';
+  // ---------------------------------------------------------------- title screen
+
+  // Wind and best-of are chosen on the title screen and locked once a game exists.
+  function applyWindMode(wm) {
+    if (wm !== 'variable' && wm !== 'constant') return;
+    windMode = wm;
+    $('windSelect').value = wm;
   }
 
-  function lockWind(locked) {
-    windLocked = locked;
+  function lockOptions(locked) {
+    optionsLocked = locked;
     $('windSelect').disabled = locked;
+    $('bestOf').disabled = locked;
   }
 
   $('windSelect').addEventListener('change', () => applyWindMode($('windSelect').value));
   applyWindMode('constant');
 
-  $('createBtn').addEventListener('click', () => {
-    lockWind(true);
-    connect(() => send({ type: 'create', windMode }));
-  });
-  $('botBtn').addEventListener('click', () => {
-    lockWind(true);
-    connect(() => send({ type: 'create', windMode, vsComputer: true }));
-  });
+  const startGame = (kind) => {
+    lockOptions(true);
+    connect(() => send({ type: 'create', mode: kind, windMode, bestOf: +$('bestOf').value }));
+  };
+  $('onlineBtn').addEventListener('click', () => startGame('online'));
+  $('localBtn').addEventListener('click', () => startGame('local'));
+  $('botBtn').addEventListener('click', () => startGame('computer'));
   const join = () => {
     const code = $('codeInput').value.trim().toUpperCase();
     if (code.length !== 4) { $('lobbyMsg').textContent = 'Enter the 4-letter game code.'; return; }
-    lockWind(true);
+    lockOptions(true);
     connect(() => send({ type: 'join', code }));
   };
   $('joinBtn').addEventListener('click', join);
@@ -355,7 +485,7 @@
   $('rematchBtn').addEventListener('click', () => {
     send({ type: 'rematch' });
     $('rematchBtn').disabled = true;
-    $('goText').textContent += '\n(Waiting for opponent...)';
+    if (mode === 'online') $('goText').textContent += '\n(Waiting for opponent...)';
   });
 
   // ---------------------------------------------------------------- drawing
@@ -400,7 +530,7 @@
     c.grid.forEach((col, ci) => {
       col.forEach((cell, r) => {
         const x = c.x0 + ci * B, y = c.baseY - (r + 1) * B;
-        const door = ci === 1 && r === 0, damaged = cell.hp < 2 && !cell.keep;
+        const door = ci === 1 && r === 0;
         ctx.fillStyle = door ? '#000' : '#fff';
         ctx.fillRect(x, y, B, B);
         ctx.strokeStyle = '#000'; ctx.lineWidth = 1;
@@ -413,11 +543,6 @@
           ctx.moveTo(x + B - vx, y + B / 2); ctx.lineTo(x + B - vx, y + B);
         }
         ctx.stroke();
-        if (damaged) {                      // hatching reads as "cracked" without using grey
-          ctx.beginPath();
-          for (let k = 3; k < 2 * B; k += 3) { ctx.moveTo(x + Math.min(k, B), y + Math.max(0, k - B)); ctx.lineTo(x + Math.max(0, k - B), y + Math.min(k, B)); }
-          ctx.stroke();
-        }
       });
     });
 
@@ -435,6 +560,7 @@
   }
 
   function drawCannon(i) {
+    if (!state.castles[i].grid.some((col) => col.some((cell) => cell.keep))) return;   // the castle has fallen
     const p = cannonPos(i), a = aim[i];
     const dir = i === 0 ? 1 : -1, rad = a.angle * Math.PI / 180;
     ctx.fillStyle = '#000'; ctx.fillRect(p.x - 4, p.y, 8, 4);
@@ -498,7 +624,7 @@
   // Newest line at the bottom, at most four lines; each message fades out after about ten seconds.
   function drawChatOutput(now) {
     chatMsgs = chatMsgs.filter((m) => now - m.born < 13000);
-    if (!chatMsgs.length || vsComputer) return;
+    if (!chatMsgs.length || mode !== 'online') return;
     const right = you === 1, x = right ? W - 12 : 12, maxW = 460, rows = [];
     ctx.font = `14px ${FONT}`; ctx.textAlign = right ? 'right' : 'left';
     for (const m of chatMsgs) {
@@ -518,14 +644,18 @@
     ctx.globalAlpha = 1;
   }
 
-  function drawBanner() {
-    if (!banner) return;
-    ctx.font = `bold 16px ${FONT}`;
-    const bw = ctx.measureText(banner).width + 48, bh = 46, x = Math.round((W - bw) / 2), y = 150;
+  function macBox(text, y, size) {
+    ctx.font = `bold ${size}px ${FONT}`;
+    const bw = ctx.measureText(text).width + 48, bh = size * 2.9, x = Math.round((W - bw) / 2);
     ctx.fillStyle = '#000'; ctx.fillRect(x + 4, y + 4, bw, bh);
     ctx.fillStyle = '#fff'; ctx.fillRect(x, y, bw, bh);
     ctx.strokeStyle = '#000'; ctx.lineWidth = 2; ctx.strokeRect(x + 1, y + 1, bw - 2, bh - 2);
-    ctx.fillStyle = '#000'; ctx.textAlign = 'center'; ctx.fillText(banner, W / 2, y + 29);
+    ctx.fillStyle = '#000'; ctx.textAlign = 'center'; ctx.fillText(text, W / 2, y + bh / 2 + size * 0.35);
+  }
+
+  function drawBanner() {
+    if (banner) macBox(banner, 150, 16);
+    if (replaying) macBox(`REPLAY - round ${lastRound.round} - ${REPLAY_SPEED}x speed`, 14, 12);
   }
 
   // A heap of black powder that grows with the charge. Stippled with a fixed hash so it doesn't shimmer.
@@ -571,23 +701,9 @@
     g.fillText(state ? `Wind ${Math.abs(state.wind)}${windMode === 'constant' ? ' (constant)' : ''}` : 'Wind', cx + 40, 30);
   }
 
-  function statusText() {
-    if (!state) return ' ';
-    return `Round ${round} (first to ${target}) - ${phaseText()}`;
-  }
-
-  function phaseText() {
-    if (over) return seriesWinner === you ? 'You won the match!' : 'You lost the match.';
-    if (roundEnded) return 'Next round starting...';
-    if (vol) return 'Cannonballs in flight...';
-    if (firedMe) return 'Locked in - waiting for opponent to fire...';
-    if (oppFired) return 'Opponent has fired - your move! Both cannons shoot when you hit Fire.';
-    return `You are the ${TEAM[you].name} castle - aim, then press Fire. Both cannons shoot once both players have fired.`;
-  }
-
   // ---------------------------------------------------------------- main loop
 
-  let last = 0, lastStatus = '';
+  let last = 0;
   function frame(ts) {
     const dt = Math.min(0.05, (ts - last) / 1000 || 0); last = ts;
     fit();
@@ -613,12 +729,10 @@
     drawBanner();
     drawIcons();
 
-    const s = statusText();
-    if (s !== lastStatus) { $('status').textContent = s; lastStatus = s; }
     requestAnimationFrame(frame);
   }
   fit();
   requestAnimationFrame(frame);
   syncControls();
-  lockWind(false);
+  lockOptions(false);
 })();

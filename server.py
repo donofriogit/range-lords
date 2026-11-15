@@ -31,7 +31,6 @@ MIN_POWDER = 10
 WIND_MODES = ("variable", "constant")
 PLAYBACK_RATE = 15        # path points shown per second; the physics samples 60/s, so shots fly in 4x slow motion
 TSTEP = 5                 # terrain sample spacing
-BLAST = 18                # explosion radius
 MAX_FLIGHT_STEPS = int(20 / DT)
 MAX_WIND = 20
 TARGET = 4                # rounds needed to win the best-of-7 match
@@ -103,9 +102,9 @@ def new_game(rng=random):
     for i in (0, 1):
         grid = []
         for c, h in enumerate(HEIGHTS):
-            col = [{"hp": 2, "keep": False} for _ in range(h)]
+            col = [{"keep": False} for _ in range(h)]
             if c == KEEP_COL[i]:
-                col[-1] = {"hp": 1, "keep": True}  # one hit and the keep is gone
+                col[-1] = {"keep": True}
             grid.append(col)
         castles.append({"x0": X0[i], "baseY": round(levels[i], 1), "keepCol": KEEP_COL[i], "grid": grid})
     return {"terrain": terrain, "castles": castles, "wind": new_wind()}
@@ -117,8 +116,9 @@ def cannon_pos(c):
 
 
 def hit(state, x, y, skip=None):
+    """What a shell at (x, y) is touching: None, -1 for the ground, or the index of the castle it struck."""
     if 0 <= x <= W and y >= ground_y(state["terrain"], x):
-        return True
+        return -1
     for idx, c in enumerate(state["castles"]):
         if idx == skip:
             continue
@@ -126,23 +126,8 @@ def hit(state, x, y, skip=None):
         if 0 <= col < COLS:
             row = int((c["baseY"] - y) // B)
             if 0 <= row < len(c["grid"][col]):
-                return True
-    return False
-
-
-def explode(state, ix, iy):
-    for c in state["castles"]:
-        for ci, col in enumerate(c["grid"]):
-            for r, cell in enumerate(col):
-                cx = c["x0"] + ci * B + B / 2
-                cy = c["baseY"] - (r + 0.5) * B
-                d = math.hypot(cx - ix, cy - iy)
-                dmg = 2 if d < BLAST * 0.5 else (1 if d < BLAST else 0)
-                if dmg:
-                    cell["hp"] -= dmg
-                    if cell["hp"] <= 0:
-                        col[r] = None
-            c["grid"][ci] = [cell for cell in col if cell]  # survivors fall down
+                return idx
+    return None
 
 
 def keep_alive(castle):
@@ -180,14 +165,17 @@ def volley(state, params, wind_mode="constant"):
                 s["path"].append([round(s["x"], 1), round(s["y"], 1)])
             if s["x"] < -60 or s["x"] > W + 60:
                 s["active"] = False
-            elif s["y"] > 0 and hit(state, s["x"], s["y"], skip=i if step < SELF_SAFE_STEPS else None):
-                hits.append(i)
-        for i in hits:  # collisions are tested before any explosion this step, so simultaneous hits are fair
+            elif s["y"] > 0:
+                touched = hit(state, s["x"], s["y"], skip=i if step < SELF_SAFE_STEPS else None)
+                if touched is not None:
+                    hits.append((i, touched))
+        for i, touched in hits:  # collisions are tested before any explosion this step, so simultaneous hits are fair
             s = shots[i]
             s["active"] = False
             s["impact"] = [round(s["x"], 1), round(s["y"], 1)]
             s["path"].append(s["impact"])
-            explode(state, *s["impact"])
+            if touched >= 0:    # only a direct hit changes a castle: it comes down whole. A shell landing beside it does nothing.
+                state["castles"][touched]["grid"] = [[] for _ in range(COLS)]
             events.append({"t": len(s["path"]) - 1, "player": i, "impact": s["impact"],
                            "castles": copy.deepcopy([c["grid"] for c in state["castles"]])})
 
@@ -217,7 +205,7 @@ def volley(state, params, wind_mode="constant"):
 # ------------------------------------------------------------ computer player
 
 def trace(state, shooter, angle, power):
-    """Where a single shell would land (no explosion, no second shell), or None if it leaves the map."""
+    """Where a single shell would land and what it hits (-1 ground, else a castle index), or None if it leaves the map."""
     x, y = cannon_pos(state["castles"][shooter])
     direction = 1 if shooter == 0 else -1
     a, v = math.radians(angle), power / MAX_POWDER * MAX_V
@@ -229,8 +217,10 @@ def trace(state, shooter, angle, power):
         y += vy * DT
         if x < -60 or x > W + 60:
             return None
-        if y > 0 and hit(state, x, y, skip=shooter if step < SELF_SAFE_STEPS else None):
-            return x, y
+        if y > 0:
+            touched = hit(state, x, y, skip=shooter if step < SELF_SAFE_STEPS else None)
+            if touched is not None:
+                return x, y, touched
     return None
 
 
@@ -263,18 +253,18 @@ def bot_shot(state, shooter, volleys):
         if v <= 0 or not MIN_POWDER <= power <= MAX_POWDER:
             continue
         land = trace(state, shooter, ang, power)
-        if land and math.hypot(land[0] - tx, land[1] - ty) < BLAST * 0.8:
+        if land and land[2] == 1 - shooter:
             good.append((ang, power))
     ang, power = random.choice(good) if good else (65, 190)
 
-    err = max(0.5, 1.5 * 0.75 ** volleys)
+    err = max(0.85, 1.6 * 0.75 ** volleys)
     ang = min(max(ang + random.gauss(0, 3 * err), 5), 85)
     power = min(max(power + random.gauss(0, 14 * err), MIN_POWDER), MAX_POWDER)
     return round(ang), round(power)
 
 
-class Bot:
-    """The computer opponent occupies seat 1 and never sends or receives anything."""
+class Seat:
+    """Seat 1 when nobody is connected there (the computer, or the second person at a shared screen)."""
     closed = False
     idx = 1
     room = None
@@ -436,6 +426,9 @@ class Room:
         self.rematch = [False, False]
         self.timer = None
         self.bot = False                # seat 1 is the computer
+        self.local = False              # both people share one screen
+        self.target = TARGET            # rounds needed to win the match
+        self.replay = [False, False]    # who has asked to watch the last round again
         self.bot_volleys = 0            # volleys fired this round, drives the computer's aiming error
         self.owner = None               # IpInfo of the address that created the room
         self.created = self.touched = time.monotonic()
@@ -449,9 +442,11 @@ class Room:
         self.round_over = False
         self.bot_volleys = 0
         self.busy_until = 0.0
+        self.replay = [False, False]
+        mode = "computer" if self.bot else "local" if self.local else "online"
         for i, cl in enumerate(self.clients):
             cl.send({"type": "start", "you": i, "state": self.state, "windMode": self.wind_mode,
-                     "score": self.score, "round": self.round, "target": TARGET, "vsComputer": self.bot})
+                     "score": self.score, "round": self.round, "target": self.target, "mode": mode})
 
     def new_match(self):
         self.score, self.round, self.over = [0, 0], 0, False
@@ -476,15 +471,19 @@ def num(v, lo, hi):
 
 
 def handle_fire(room, client, msg):
-    if not room.state or room.over or room.round_over or room.pending[client.idx] is not None:
+    idx = client.idx
+    if room.local and type(msg.get("seat")) is int and msg["seat"] in (0, 1):
+        idx = msg["seat"]       # two people share this device and take turns locking in
+    if not room.state or room.over or room.round_over or room.pending[idx] is not None:
         return
     if LIMITS_ON and time.monotonic() < room.busy_until:   # a real client is locked until the volley finishes playing
         return
     angle, power = num(msg.get("angle"), 0, 90), num(msg.get("power"), MIN_POWDER, MAX_POWDER)
     if angle is None or power is None:
         return
-    room.pending[client.idx] = (angle, power)
-    room.clients[1 - client.idx].send({"type": "fired", "player": client.idx})
+    room.pending[idx] = (angle, power)
+    if not room.local:
+        room.clients[1 - idx].send({"type": "fired", "player": idx})
     if room.bot and room.pending[1] is None:
         room.pending[1] = bot_shot(room.state, 1, room.bot_volleys)
     if any(p is None for p in room.pending):
@@ -492,12 +491,13 @@ def handle_fire(room, client, msg):
 
     result = volley(room.state, room.pending, room.wind_mode)
     room.pending = [None, None]
+    room.replay = [False, False]
     room.bot_volleys += 1
     rw = result["roundWinner"]
     if rw in (0, 1):
         room.score[rw] += 1
     result["score"] = list(room.score)
-    result["seriesWinner"] = rw if rw in (0, 1) and room.score[rw] >= TARGET else None
+    result["seriesWinner"] = rw if rw in (0, 1) and room.score[rw] >= room.target else None
     room.round_over = rw is not None
     room.over = result["seriesWinner"] is not None
     for cl in room.clients:
@@ -506,6 +506,23 @@ def handle_fire(room, client, msg):
     room.busy_until = time.monotonic() + flight - VOLLEY_SLACK
     if room.round_over and not room.over:
         room.timer = asyncio.get_running_loop().call_later(flight + 3.5, room.start_round)
+
+
+def handle_replay(room, client):
+    """Both players must ask before the last round is replayed, like Fire. One press is enough with a computer or a shared screen."""
+    if not room.state or (room.round_over and not room.over) or any(room.pending):
+        return
+    if LIMITS_ON and time.monotonic() < room.busy_until:
+        return
+    room.replay[client.idx] = True
+    if room.bot or room.local:
+        room.replay = [True, True]
+    if all(room.replay):
+        room.replay = [False, False]
+        for cl in room.clients:
+            cl.send({"type": "replay_go"})
+    else:
+        room.clients[1 - client.idx].send({"type": "replay_wait"})
 
 
 def handle_message(client, msg):
@@ -525,12 +542,15 @@ def handle_message(client, msg):
         info.rooms += 1
         if msg.get("windMode") in WIND_MODES:
             room.wind_mode = msg["windMode"]
+        if type(msg.get("bestOf")) is int and msg["bestOf"] in (3, 5, 7, 9):
+            room.target = (msg["bestOf"] + 1) // 2
         rooms[room.code] = room
         room.clients[0] = client
         client.room, client.idx = room, 0
-        if msg.get("vsComputer") is True:
-            room.bot = True
-            room.clients[1] = Bot()
+        if msg.get("mode") in ("computer", "local"):
+            room.bot = msg["mode"] == "computer"
+            room.local = msg["mode"] == "local"
+            room.clients[1] = Seat()
             room.new_match()
         else:
             client.send({"type": "created", "code": room.code})
@@ -551,7 +571,10 @@ def handle_message(client, msg):
     elif kind == "fire" and room:
         handle_fire(room, client, msg)
 
-    elif kind == "chat" and room and room.clients[1] and not room.bot:
+    elif kind == "replay" and room:
+        handle_replay(room, client)
+
+    elif kind == "chat" and room and room.clients[1] and not room.bot and not room.local:
         text = "".join(ch for ch in " ".join(str(msg.get("text", "")).split()) if ch.isprintable())[:120]
         now = time.monotonic()
         if text and now - client.last_chat >= 0.4:
@@ -561,7 +584,7 @@ def handle_message(client, msg):
 
     elif kind == "rematch" and room and room.over:
         room.rematch[client.idx] = True
-        if room.bot:
+        if room.bot or room.local:
             room.rematch[1] = True
         if all(room.rematch):
             room.new_match()
