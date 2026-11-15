@@ -59,7 +59,14 @@
     }
     scale = canvas.width / W;
   }
-  window.addEventListener('resize', fit);
+  // Touch layout: big on-screen controls for phones, tablets and any small window (the CSS does the rest).
+  function layoutMode() {
+    const touch = matchMedia('(pointer: coarse)').matches || innerWidth < 700 || innerHeight < 520;
+    document.body.classList.toggle('touch', touch);
+    document.body.classList.toggle('land', touch && innerWidth > innerHeight);
+  }
+  window.addEventListener('resize', () => { layoutMode(); fit(); });
+  window.addEventListener('orientationchange', () => { layoutMode(); fit(); });
 
   // ---------------------------------------------------------------- network
 
@@ -106,6 +113,7 @@
         break;
       case 'fired':
         if (mode === 'online' && m.player !== you) oppFired = true;
+        syncControls();
         break;
       case 'volley':
         startVolley(m);
@@ -116,6 +124,10 @@
         break;
       case 'replay_go':
         startReplay();
+        break;
+      case 'replay_denied':     // the server could not start a replay right now: let the button come back
+        replayPressed = false;
+        syncControls();
         break;
       case 'chat':
         chatMsgs.push({ player: m.player, text: m.text, born: performance.now() });
@@ -353,8 +365,8 @@
   // ---------------------------------------------------------------- controls
 
   const canAim = () => !!state && !over && !roundEnded && !vol && !replaying && !firedMe;
-  const canReplay = () => !!lastRound && !!state && !vol && !replaying && !firedMe && !oppFired && !replayPressed
-    && (over || !roundEnded) && maskedSeat < 0;
+  const canReplay = () => !!lastRound && !!state && !vol && !replaying && !firedMe && !oppFired && !replayPressed && maskedSeat < 0;
+  const HOLD = '.arr, .tbtn[data-k]';          // buttons that repeat while held (strip arrows and the touch steppers)
   const setText = (id, t) => { const el = $(id); if (el.textContent !== String(t)) el.textContent = t; };
 
   function syncControls() {
@@ -374,16 +386,23 @@
       setText('pa' + i, p ? `prev ${Math.round(p.angle)}°` : '');
       setText('pp' + i, p ? `prev ${Math.round(p.power)}g` : '');
     }
-    const on = canAim();
-    document.querySelectorAll('.arr').forEach((b) => { b.disabled = !on; });
-    $('fireBtn').disabled = !on;
+    const on = canAim(), rp = canReplay();
+    document.querySelectorAll(HOLD).forEach((b) => { b.disabled = !on; });
     let label = firedMe ? 'Locked in' : 'Fire';
     if (local && state && !firedMe) label = localSeat === 0 ? 'Blue: Lock in' : 'Red: Fire';
-    setText('fireBtn', label);
-    const rp = canReplay();
-    $('replayBtn').disabled = !rp;
-    setText('replayBtn', replayPressed ? 'Waiting...' : (oppReplay && rp ? 'Join replay' : 'Replay'));
+    const replayLabel = replayPressed ? 'Waiting...' : (oppReplay && rp ? 'Join replay' : 'Replay');
+    for (const [id, enabled, text] of [['fireBtn', on, label], ['tFire', on, label], ['replayBtn', rp, replayLabel], ['tReplay', rp, replayLabel]]) {
+      $(id).disabled = !enabled; setText(id, text);
+    }
     $('replayBtn2').disabled = !rp;
+    // the touch pad shows the dials of whoever is aiming
+    const a = state && aim[act];
+    setText('tAng', a ? Math.round(a.angle) + '°' : '--');
+    setText('tPow', a ? Math.round(a.power) + 'g' : '--');
+    setText('tWho', !state ? '' : local ? `${nameOf(act)} aiming` : `You are ${nameOf(you)}`);
+    // a lock beside Fire shows that the other player has locked in
+    const oppLocked = !!state && !over && !roundEnded && (mode === 'online' ? oppFired : local && maskedSeat === 0);
+    document.querySelectorAll('.lock').forEach((el) => el.classList.toggle('on', oppLocked));
   }
 
   function setAim(angle, power) {
@@ -421,9 +440,11 @@
 
   let holdDelay = null, holdRepeat = null;
   function stopHold() { clearTimeout(holdDelay); clearInterval(holdRepeat); holdDelay = holdRepeat = null; }
-  document.querySelectorAll('.arr').forEach((b) => {
+  document.querySelectorAll(HOLD).forEach((b) => {
     b.addEventListener('pointerdown', (e) => {
       e.preventDefault();
+      stopHold();
+      try { b.setPointerCapture(e.pointerId); } catch (err) { /* older browsers */ }   // so the release always reaches this button
       const kind = b.dataset.k, d = +b.dataset.d;
       nudge(kind, d);
       holdDelay = setTimeout(() => {
@@ -431,11 +452,16 @@
         holdRepeat = setInterval(() => nudge(kind, kind === 'power' && ++ticks > 12 ? d * 5 : d), 70);
       }, 350);
     });
-    ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => b.addEventListener(ev, stopHold));
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach((ev) => b.addEventListener(ev, stopHold));
+    b.addEventListener('contextmenu', (e) => e.preventDefault());       // no long-press menu on a phone
   });
+  window.addEventListener('blur', stopHold);
+  document.addEventListener('visibilitychange', stopHold);
 
   $('fireBtn').addEventListener('click', doFire);
+  $('tFire').addEventListener('click', doFire);
   $('replayBtn').addEventListener('click', requestReplay);
+  $('tReplay').addEventListener('click', requestReplay);
   $('replayBtn2').addEventListener('click', requestReplay);
   window.addEventListener('keydown', (e) => {
     if (!state || document.activeElement.tagName === 'INPUT') return;
@@ -731,6 +757,7 @@
 
     requestAnimationFrame(frame);
   }
+  layoutMode();
   fit();
   requestAnimationFrame(frame);
   syncControls();

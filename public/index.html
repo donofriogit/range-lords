@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Range Lords</title>
 <style>
   /* --u is the window's scale relative to the original 1000px layout; game.js keeps it in sync on resize. */
@@ -10,39 +10,46 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; background: #000; }
   body { font-family: Chicago, Geneva, "Lucida Grande", Verdana, sans-serif; font-size: calc(12px * var(--u)); color: #000;
-         display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 8px 0; }
+         display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 4px 0 3px; }
   body.menu { overflow: hidden; }
   button, input, select { font: inherit; color: inherit; }
+  button { -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 
-  /* the game window: playfield + control strip */
-  /* Scale the whole game to fit the screen, by height as well as width (phones, short laptop windows).
-     The window is about 0.78 times as tall as it is wide once the keyboard hint is counted. */
-  #mac { width: min(100vw, 1200px, calc((100vh - 24px) / 0.78)); }
-  @supports (height: 100dvh) { #mac { width: min(100vw, 1200px, calc((100dvh - 24px) / 0.78)); } }
+  /* the game window: playfield + control strip. It scales to fit the screen by height as well as width. */
+  #stage { display: flex; flex-direction: column; align-items: center; width: 100%; }
+  #mac { width: min(100vw, 1200px, calc((100vh - 16px) / 0.76)); }
+  @supports (height: 100dvh) { #mac { width: min(100vw, 1200px, calc((100dvh - 16px) / 0.76)); } }
   #window { border: 2px solid #000; background: #fff; }
   #field { position: relative; border-bottom: 2px solid #000; }
   canvas { display: block; width: 100%; height: auto; }
   #c { background: #80dfff; }
 
-  /* bottom control panel */
+  /* bottom control strip */
   #strip { display: flex; align-items: center; height: calc(26px * var(--u)); padding: 0 2px; font-size: calc(11px * var(--u)); background: #fff; }
   .side { display: flex; align-items: center; gap: calc(4px * var(--u)); }
   .spin { display: inline-flex; align-items: center; border: 1px solid #000; height: calc(19px * var(--u)); background: #fff; }
   .spin b { min-width: calc(40px * var(--u)); text-align: center; font-weight: bold; }
-  .arr { border: 0; background: transparent; padding: 0 calc(3px * var(--u)); height: 100%; cursor: pointer; font-weight: bold; font-size: calc(12px * var(--u)); line-height: 1; }
-  .arr:hover:not(:disabled) { background: #000; color: #fff; }
+  .arr { border: 0; background: transparent; padding: 0 calc(3px * var(--u)); height: 100%; cursor: pointer; font-weight: bold; font-size: calc(12px * var(--u)); line-height: 1; touch-action: none; }
   .arr:disabled { color: #aaa; cursor: default; }
   .side.theirs .arr { visibility: hidden; }
   .score { margin: 0 calc(6px * var(--u)); white-space: nowrap; }
   small.prev { font-size: calc(8px * var(--u)); line-height: 1; color: #555; min-width: calc(34px * var(--u)); white-space: nowrap; }
   .pname { flex: 1; text-align: center; font-weight: bold; white-space: nowrap; }
-  .stripbtn { height: calc(21px * var(--u)); padding: 0 calc(12px * var(--u)); border: 2px solid #000; border-radius: calc(10px * var(--u)); background: #fff; font-weight: bold; cursor: pointer; white-space: nowrap; }
+  .stripbtn { height: calc(21px * var(--u)); padding: 0 calc(12px * var(--u)); border: 2px solid #000; border-radius: calc(10px * var(--u)); background: #fff;
+              font-weight: bold; cursor: pointer; white-space: nowrap; text-align: center; }
+  #fireBtn { min-width: calc(112px * var(--u)); }      /* wide enough for "Blue: Lock in" so the button never changes size */
+  #replayBtn { min-width: calc(86px * var(--u)); }
   .stripbtn + .stripbtn { margin-left: calc(6px * var(--u)); }
-  .stripbtn:hover:not(:disabled), .stripbtn:active:not(:disabled) { background: #000; color: #fff; }
+  .stripbtn:active:not(:disabled) { background: #000; color: #fff; }
   .stripbtn:disabled { color: #888; border-color: #888; cursor: default; }
+  .lock { width: calc(14px * var(--u)); height: calc(16px * var(--u)); margin-left: calc(6px * var(--u)); visibility: hidden; flex: none; }
+  .lock.on { visibility: visible; }
   #icons { border-top: 1px solid #000; }
 
-  #panelPad { height: calc(6px * var(--u)); }
+  /* hover styling only where there is a real hover, so taps on a phone don't leave buttons stuck inverted */
+  @media (hover: hover) {
+    .arr:hover:not(:disabled), .stripbtn:hover:not(:disabled), .dialog button:hover:not(:disabled), #lobby button:hover:not(:disabled) { background: #000; color: #fff; }
+  }
 
   /* chat input: a slightly lighter patch of the green ground under the opponent's castle */
   #chatForm { position: absolute; bottom: calc(10px * var(--u)); width: calc(300px * var(--u)); z-index: 5; margin: 0; }
@@ -54,7 +61,44 @@
   #chatInput:focus { background: #209b44; border-color: #000; }
   #chatInput:disabled { opacity: .6; }
 
-  .hint { color: #888; font-size: calc(11px * var(--u)); margin-top: 4px; text-align: center; padding: 0 8px; }
+  .hint { color: #888; font-size: calc(11px * var(--u)); line-height: 1.1; margin: 2px 0 0; padding: 0 8px; text-align: center; }
+
+  /* touch controls: big targets for phones and tablets. Shown instead of the tiny strip buttons. */
+  .tpad { display: none; }
+  .tbtn { min-height: 50px; border: 2px solid #000; border-radius: 12px; background: #fff; font-weight: bold; font-size: 20px; cursor: pointer;
+          touch-action: none; -webkit-touch-callout: none; }
+  .tbtn:active:not(:disabled) { background: #000; color: #fff; }
+  .tbtn:disabled { color: #888; border-color: #888; }
+  .stepper { display: grid; grid-template-columns: 56px 1fr 56px; gap: 6px; align-items: stretch; }
+  .stepper .val { min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #fff; border: 2px solid #000; border-radius: 12px; }
+  .stepper .val small { font-size: 11px; color: #555; line-height: 1; }
+  .stepper .val b { font-size: 20px; line-height: 1.1; }
+  #tWho { color: #ddd; font-size: 13px; text-align: center; min-height: 16px; }
+  #tFire, #tReplay { font-size: 18px; }
+  .fire-row { display: flex; align-items: center; gap: 8px; }
+  .fire-row #tFire { flex: 1; min-height: 56px; }
+  .fire-row .lock { width: 22px; height: 26px; margin: 0; }
+  body.touch .hint, body.touch #strip .stripbtn, body.touch #strip .lock, body.touch .side .arr { display: none; }
+  body.touch .tpad { display: flex; flex-direction: column; gap: 6px; }
+  body.touch #stage { gap: 6px; }
+  body.touch .t-aim, body.touch .t-act { width: min(100vw - 16px, 440px); }
+  body.touch .t-act { flex-direction: row; gap: 8px; }
+  body.touch .t-act #tReplay { flex: 1; min-height: 56px; }
+  body.touch .t-act .fire-row { flex: 2; }
+  /* portrait phone: the game on top, the touch pad underneath */
+  body.touch #mac { width: min(100vw, 1200px, calc((100vh - 16px - 196px) / 0.76)); }
+  @supports (height: 100dvh) { body.touch #mac { width: min(100vw, 1200px, calc((100dvh - 16px - 196px) / 0.76)); } }
+  /* landscape phone: angle and powder on the left of the game, Fire and Replay on the right */
+  body.touch.land #stage { flex-direction: row; justify-content: center; align-items: center; gap: 8px; padding: 0 6px; }
+  body.touch.land .t-aim { order: 0; width: 172px; }
+  body.touch.land #mac { order: 1; width: min(calc(100vw - 384px), 1200px, calc((100vh - 16px) / 0.76)); }
+  body.touch.land .t-act { order: 2; width: 172px; flex-direction: column-reverse; }
+  body.touch.land #tFire, body.touch.land #tReplay { font-size: 15px; white-space: nowrap; }
+  body.touch.land .t-act #tReplay { flex: none; min-height: 46px; }
+  body.touch.land .t-act .fire-row { flex: none; }
+  body.touch.land .stepper { grid-template-columns: 46px minmax(0, 1fr) 46px; gap: 5px; }
+  body.touch.land .stepper .val b { font-size: 17px; }
+  @supports (height: 100dvh) { body.touch.land #mac { width: min(calc(100vw - 384px), 1200px, calc((100dvh - 16px) / 0.76)); } }
 
   /* Mac dialog boxes */
   .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
@@ -63,7 +107,7 @@
   .dialog h2 { margin: 0; font-size: calc(16px * var(--u)); white-space: pre-line; }
   .dialog p { margin: 0; line-height: 1.4; }
   .dialog button { height: calc(22px * var(--u)); padding: 0 calc(16px * var(--u)); border: 2px solid #000; border-radius: calc(9px * var(--u)); background: #fff; font-weight: bold; cursor: pointer; }
-  .dialog button:hover:not(:disabled) { background: #000; color: #fff; }
+  .dialog button:active:not(:disabled) { background: #000; color: #fff; }
   .dialog button:disabled { color: #888; border-color: #888; cursor: default; }
   .row { display: flex; gap: calc(8px * var(--u)); align-items: center; }
   #code { font-size: calc(36px * var(--u)); font-weight: bold; letter-spacing: 8px; }
@@ -78,9 +122,9 @@
   #lobbyMenu .types { left: 1.2em; top: 50%; transform: translateY(-50%); width: 11.5em; }
   #lobbyMenu .opts { right: 1.2em; top: 5%; width: 12em; padding: .8em; background: #fff; border: 2px solid #000; box-shadow: 4px 4px 0 #000; gap: .6em; }
   #lobby button { height: 2.4em; border: 2px solid #000; border-radius: 1.2em; background: #fff; font-weight: bold; cursor: pointer; box-shadow: 3px 3px 0 #000; }
-  #lobby button:hover:not(:disabled) { background: #000; color: #fff; }
+  #lobby button:active:not(:disabled) { background: #000; color: #fff; }
   #lobby button:disabled { color: #888; border-color: #888; box-shadow: none; cursor: default; }
-  #lobby .join { display: flex; flex-direction: column; gap: .5em; margin-top: .6em; padding-top: .8em; border-top: 2px dashed rgba(255, 255, 255, .7); }
+  #lobby .join { display: flex; flex-direction: column; gap: .7em; margin-top: .3em; padding-top: 1em; border-top: 2px dashed rgba(255, 255, 255, .8); }
   #lobby input { height: 2.2em; text-align: center; text-transform: uppercase; letter-spacing: .3em; font-weight: bold; border: 2px solid #000; border-radius: 0; background: #fff; }
   #lobby .opts b { display: block; text-align: center; border-bottom: 2px solid #000; padding-bottom: .4em; }
   #lobby .opts label { display: flex; justify-content: space-between; align-items: center; gap: .6em; font-weight: bold; }
@@ -92,6 +136,7 @@
 </style>
 </head>
 <body class="menu">
+  <div id="stage">
   <div id="mac">
     <div id="window">
       <div id="field">
@@ -102,15 +147,15 @@
         </form>
 
         <div id="lobby">
-          <img class="bg" src="title.jpg" alt="RANGE LORDS: 256 GRAINS - armored lords, castles on opposing hills, and a cannon at sunset">
-          <h1 class="sr-only">RANGE LORDS: 256 GRAINS</h1>
+          <img class="bg" src="title.jpg" alt="RANGE LORDS: 256 GRAINS - A Projectile Motion Simulation. Armored lords, castles on opposing hills, and a cannon at sunset.">
+          <h1 class="sr-only">RANGE LORDS: 256 GRAINS - A Projectile Motion Simulation</h1>
 
           <div id="lobbyMenu">
             <nav class="types">
-              <button id="onlineBtn">Online Game</button>
               <button id="localBtn">Local Game</button>
               <button id="botBtn">Play Computer</button>
               <div class="join">
+                <button id="onlineBtn">Online Game</button>
                 <input id="codeInput" type="text" maxlength="4" placeholder="CODE" autocomplete="off">
                 <button id="joinBtn">Join Game</button>
               </div>
@@ -165,6 +210,7 @@
           <span class="pname" id="pname0">Blue</span>
           <button id="replayBtn" class="stripbtn" disabled>Replay</button>
           <button id="fireBtn" class="stripbtn" disabled>Fire</button>
+          <svg class="lock" viewBox="0 0 14 16" role="img" aria-label="Opponent has locked in"><title>Opponent has locked in</title><path d="M3.5 7V4.5a3.5 3.5 0 0 1 7 0V7" fill="none" stroke="#000" stroke-width="2"/><rect x="1" y="7" width="12" height="8" fill="#000"/><rect x="6" y="10" width="2" height="3" fill="#fff"/></svg>
           <span class="pname" id="pname1">Red</span>
           <div class="side" id="side1">
             <span class="score">Score: <span id="sc1">0</span></span>
@@ -178,7 +224,28 @@
       </div>
 
     </div>
-    <div id="panelPad"></div>
+  </div>
+
+  <div class="tpad t-aim">
+    <div id="tWho"></div>
+    <div class="stepper">
+      <button class="tbtn" data-k="angle" data-d="-1" aria-label="Angle down">&minus;</button>
+      <div class="val"><small>Angle</small><b id="tAng">60&deg;</b></div>
+      <button class="tbtn" data-k="angle" data-d="1" aria-label="Angle up">+</button>
+    </div>
+    <div class="stepper">
+      <button class="tbtn" data-k="power" data-d="-1" aria-label="Powder down">&minus;</button>
+      <div class="val"><small>Powder</small><b id="tPow">192g</b></div>
+      <button class="tbtn" data-k="power" data-d="1" aria-label="Powder up">+</button>
+    </div>
+  </div>
+  <div class="tpad t-act">
+    <button id="tReplay" class="tbtn" disabled>Replay</button>
+    <div class="fire-row">
+      <button id="tFire" class="tbtn" disabled>Fire</button>
+      <svg class="lock" viewBox="0 0 14 16" role="img" aria-label="Opponent has locked in"><title>Opponent has locked in</title><path d="M3.5 7V4.5a3.5 3.5 0 0 1 7 0V7" fill="none" stroke="#000" stroke-width="2"/><rect x="1" y="7" width="12" height="8" fill="#000"/><rect x="6" y="10" width="2" height="3" fill="#fff"/></svg>
+    </div>
+  </div>
   </div>
 
   <div class="hint">Keys: &larr;/&rarr; angle, &uarr;/&darr; powder (hold Shift for bigger steps), Space to fire. Hold the arrow buttons to repeat. Chat box: Enter sends, Esc leaves it.</div>

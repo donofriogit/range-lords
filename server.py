@@ -30,6 +30,8 @@ MAX_POWDER = 256          # grains of powder in a full charge
 MIN_POWDER = 10
 WIND_MODES = ("variable", "constant")
 PLAYBACK_RATE = 15        # path points shown per second; the physics samples 60/s, so shots fly in 4x slow motion
+REPLAY_SPEED = 3          # replays play this many times faster than the live slow motion
+ROUND_END_PAUSE = 5.0     # seconds the result stays up before the next round starts (time to ask for a replay)
 TSTEP = 5                 # terrain sample spacing
 MAX_FLIGHT_STEPS = int(20 / DT)
 MAX_WIND = 20
@@ -429,6 +431,7 @@ class Room:
         self.local = False              # both people share one screen
         self.target = TARGET            # rounds needed to win the match
         self.replay = [False, False]    # who has asked to watch the last round again
+        self.flights = []               # playing time of each volley this round, to size a replay
         self.bot_volleys = 0            # volleys fired this round, drives the computer's aiming error
         self.owner = None               # IpInfo of the address that created the room
         self.created = self.touched = time.monotonic()
@@ -443,6 +446,7 @@ class Room:
         self.bot_volleys = 0
         self.busy_until = 0.0
         self.replay = [False, False]
+        self.flights = []
         mode = "computer" if self.bot else "local" if self.local else "online"
         for i, cl in enumerate(self.clients):
             cl.send({"type": "start", "you": i, "state": self.state, "windMode": self.wind_mode,
@@ -503,26 +507,31 @@ def handle_fire(room, client, msg):
     for cl in room.clients:
         cl.send(result)
     flight = max(len(s["path"]) for s in result["shots"]) / PLAYBACK_RATE
+    room.flights.append(flight)
     room.busy_until = time.monotonic() + flight - VOLLEY_SLACK
     if room.round_over and not room.over:
-        room.timer = asyncio.get_running_loop().call_later(flight + 3.5, room.start_round)
+        room.timer = asyncio.get_running_loop().call_later(flight + ROUND_END_PAUSE, room.start_round)
 
 
 def handle_replay(room, client):
-    """Both players must ask before the last round is replayed, like Fire. One press is enough with a computer or a shared screen."""
-    if not room.state or (room.round_over and not room.over) or any(room.pending):
-        return
-    if LIMITS_ON and time.monotonic() < room.busy_until:
-        return
+    """Both players must ask before the last round is replayed, like Fire. One press is enough with a computer or a
+    shared screen. It also works while the result of a round is still showing: the next round then waits for the replay."""
+    refused = (not room.state or any(room.pending)
+               or (LIMITS_ON and time.monotonic() < room.busy_until))
+    if refused:
+        return client.send({"type": "replay_denied"})
     room.replay[client.idx] = True
     if room.bot or room.local:
         room.replay = [True, True]
-    if all(room.replay):
-        room.replay = [False, False]
-        for cl in room.clients:
-            cl.send({"type": "replay_go"})
-    else:
-        room.clients[1 - client.idx].send({"type": "replay_wait"})
+    if not all(room.replay):
+        return room.clients[1 - client.idx].send({"type": "replay_wait"})
+    room.replay = [False, False]
+    if room.timer:      # a round just ended: hold the next round back until the replay has played out
+        room.timer.cancel()
+        length = sum(f / REPLAY_SPEED for f in room.flights) + 0.6 * max(0, len(room.flights) - 1) + 2.0
+        room.timer = asyncio.get_running_loop().call_later(length + 2.0, room.start_round)
+    for cl in room.clients:
+        cl.send({"type": "replay_go"})
 
 
 def handle_message(client, msg):
