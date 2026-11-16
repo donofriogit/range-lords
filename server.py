@@ -13,6 +13,7 @@ import math
 import mimetypes
 import os
 import random
+import signal
 import struct
 import sys
 import time
@@ -20,7 +21,7 @@ from urllib.parse import unquote, urlsplit
 
 # ---------------------------------------------------------------- game logic
 
-W, H = 1000, 650          # playfield size in px
+W, H = 1000, 700          # playfield size in px
 B = 10                    # block size
 COLS = 3                  # columns per castle
 G = 300.0                 # gravity px/s^2
@@ -34,7 +35,7 @@ REPLAY_SPEED = 3          # replays play this many times faster than the live sl
 ROUND_END_PAUSE = 5.0     # seconds the result stays up before the next round starts (time to ask for a replay)
 TSTEP = 5                 # terrain sample spacing
 MAX_FLIGHT_STEPS = int(20 / DT)
-MAX_WIND = 20
+MAX_WIND = 80              # strong enough to blow a high lob right back toward the shooter
 TARGET = 4                # rounds needed to win the best-of-7 match
 SELF_SAFE_STEPS = 12      # a fresh shell ignores its own castle briefly so it can clear the walls
 
@@ -43,7 +44,10 @@ SELF_SAFE_STEPS = 12      # a fresh shell ignores its own castle briefly so it c
 HEIGHTS = [3, 2, 3]
 KEEP_COL = (2, 0)
 
-X0 = (60, W - 60 - COLS * B)
+# Where the castles may stand: the left castle's x0 and the right castle's outer edge. The gap between them changes every round.
+LEFT_X0 = (50, 200)
+RIGHT_EDGE = (800, 950)
+MIN_SOLUTIONS = 3         # a map is only used if each side has at least this many distinct winning angles
 
 
 def smoothstep(t):
@@ -52,20 +56,33 @@ def smoothstep(t):
 
 
 def pick_levels(rng):
-    """Ground height under each castle (bigger y = lower). Often similar, often one side far higher."""
-    if rng.random() < 0.35:
-        return [rng.uniform(480, 555), rng.uniform(480, 555)]
-    high, low = rng.uniform(390, 460), rng.uniform(510, 560)
-    return [high, low] if rng.random() < 0.5 else [low, high]
+    """Ground height under each castle (bigger y = lower), anywhere from near the top of the screen to near the bottom.
+    Mostly a real height difference, up to about 490 px; one map in five is almost level."""
+    r = rng.random()
+    if r < 0.20:
+        diff = rng.uniform(0, 25)        # almost level
+    elif r < 0.45:
+        diff = rng.uniform(60, 200)
+    else:
+        diff = rng.uniform(200, 490)
+    low = rng.uniform(110 + diff, 600)
+    levels = [low - diff, low]
+    if rng.random() < 0.5:
+        levels.reverse()
+    return levels
 
 
-def make_terrain(rng, levels):
+def make_terrain(rng, levels, x0):
     """Flat shelf under each castle with a lopsided hill between them, sometimes with a second hump."""
-    left, right = rng.uniform(110, 330), rng.uniform(670, 890)   # where the hill starts and ends
-    cx = rng.uniform(max(left + 120, 400), min(right - 120, 600))  # peak position
+    inner_l, inner_r = x0[0] + COLS * B, x0[1]            # the inner edges of the two castles
+    gap = inner_r - inner_l
+    left = inner_l + gap * rng.uniform(0.05, 0.2)          # where the hill starts and ends
+    right = inner_r - gap * rng.uniform(0.05, 0.2)
     span = right - left
+    cx = rng.uniform(left + 0.3 * span, right - 0.3 * span)   # peak position
     mid = levels[0] + (levels[1] - levels[0]) * smoothstep((cx - left) / span)
-    peak = rng.uniform(110, min(levels) - 90)
+    top = min(levels)
+    peak = rng.uniform(max(20, top - 220), max(30, top - 40))   # the hill rises above both castles, even when one is near the top
     amp = mid - peak
     hump = None
     if rng.random() < 0.5:
@@ -97,9 +114,10 @@ def new_wind():
     return random.randint(-MAX_WIND, MAX_WIND)
 
 
-def new_game(rng=random):
+def build_game(rng):
     levels = pick_levels(rng)
-    terrain = make_terrain(rng, levels)
+    x0 = (round(rng.uniform(*LEFT_X0)), round(rng.uniform(*RIGHT_EDGE)) - COLS * B)
+    terrain = make_terrain(rng, levels, x0)
     castles = []
     for i in (0, 1):
         grid = []
@@ -108,8 +126,17 @@ def new_game(rng=random):
             if c == KEEP_COL[i]:
                 col[-1] = {"keep": True}
             grid.append(col)
-        castles.append({"x0": X0[i], "baseY": round(levels[i], 1), "keepCol": KEEP_COL[i], "grid": grid})
+        castles.append({"x0": x0[i], "baseY": round(levels[i], 1), "keepCol": KEEP_COL[i], "grid": grid})
     return {"terrain": terrain, "castles": castles, "wind": new_wind()}
+
+
+def new_game(rng=random):
+    """A fresh map. Strong wind, a tall hill and uneven ground can occasionally make a side unwinnable, so reject those."""
+    for _ in range(40):
+        state = build_game(rng)
+        if all(len(solutions(state, i)) >= MIN_SOLUTIONS for i in (0, 1)):
+            break
+    return state
 
 
 def cannon_pos(c):
@@ -226,12 +253,10 @@ def trace(state, shooter, angle, power):
     return None
 
 
-def bot_shot(state, shooter, volleys):
-    """Pick (angle, grains) for the computer. It only looks at the board and the wind, never at the human's aim.
-
-    For each launch angle, solve the constant-acceleration flight equations (gravity plus wind) for the powder
-    that passes through the enemy keep, then check that shot against the real simulation (the hill may be in the
-    way). Finally add aiming error that shrinks with every volley fired this round, like a gunner ranging in."""
+def solutions(state, shooter):
+    """Launch settings (angle, grains) that really do destroy the enemy castle, found by solving the constant-acceleration
+    flight equations (gravity plus wind) for each angle and then checking the result against the full simulation, since
+    the hill may be in the way."""
     foe = state["castles"][1 - shooter]
     k = foe["keepCol"]
     tx = foe["x0"] + k * B + B / 2
@@ -241,7 +266,7 @@ def bot_shot(state, shooter, volleys):
     dx, dy, wind = tx - x0, ty - y0, state["wind"]
 
     good = []
-    for ang in range(46, 86, 2):
+    for ang in range(20, 86, 2):
         sin_a, cot_a = math.sin(math.radians(ang)), 1 / math.tan(math.radians(ang))
         accel = 0.5 * (d * cot_a * G + wind)
         if abs(accel) < 1e-9:
@@ -257,6 +282,15 @@ def bot_shot(state, shooter, volleys):
         land = trace(state, shooter, ang, power)
         if land and land[2] == 1 - shooter:
             good.append((ang, power))
+    return good
+
+
+def bot_shot(state, shooter, volleys):
+    """Pick (angle, grains) for the computer. It only looks at the board and the wind, never at the human's aim.
+
+    It takes one of the real solutions, then adds aiming error that shrinks with every volley fired this round,
+    like a gunner ranging in."""
+    good = solutions(state, shooter)
     ang, power = random.choice(good) if good else (65, 190)
 
     err = max(0.85, 1.6 * 0.75 ** volleys)
@@ -445,6 +479,7 @@ class Room:
         self.owner = None               # IpInfo of the address that created the room
         self.created = self.touched = time.monotonic()
         self.busy_until = 0.0           # the previous volley is still playing on the clients until then
+        self.counted = False            # this match has been added to the stats
 
     def start_round(self):
         self.timer = None
@@ -464,8 +499,63 @@ class Room:
     def new_match(self):
         self.score, self.round, self.over = [0, 0], 0, False
         self.rematch = [False, False]
+        self.counted = False
         self.start_round()
 
+
+# --------------------------------------------------------------------- stats
+
+STATS_FILE = os.environ.get("STATS_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "stats.json"))
+STATS_DAYS = 60                  # days of per-day history to keep
+
+
+class Stats:
+    """The three numbers on the title screen. A game counts once its first volley has been fired, so rooms that were
+    opened and abandoned do not inflate it. Nothing about individual players is recorded."""
+
+    def __init__(self, path):
+        self.path = path
+        self.dirty = False
+        self.total = 0
+        self.days = {}                 # "YYYY-MM-DD" (UTC) -> games started that day
+        self._load()
+
+    def _load(self):
+        try:
+            with open(self.path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return
+        totals = data.get("totals", {})
+        self.total = int(totals.get("games", 0)) if isinstance(totals, dict) else 0
+        for day, v in data.get("days", {}).items():       # older files stored a dict per day; keep only the game count
+            self.days[day] = int(v.get("games", 0)) if isinstance(v, dict) else int(v)
+
+    def save(self):
+        tmp = self.path + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump({"totals": {"games": self.total}, "days": self.days}, f)
+            os.replace(tmp, self.path)
+            self.dirty = False
+        except OSError as e:
+            print(f"[stats] could not save: {e}", flush=True)
+
+    def game_started(self):
+        key = time.strftime("%Y-%m-%d", time.gmtime())
+        self.days[key] = self.days.get(key, 0) + 1
+        for old in sorted(self.days)[:-STATS_DAYS]:
+            del self.days[old]
+        self.total += 1
+        self.dirty = True
+
+    def snapshot(self):
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        playing = sum(isinstance(c, Client) for r in rooms.values() if r.state for c in r.clients)
+        return {"playingNow": playing, "gamesToday": self.days.get(today, 0), "totalGames": self.total}
+
+
+stats = Stats(STATS_FILE)
 
 rooms = {}
 
@@ -507,6 +597,9 @@ def handle_fire(room, client, msg):
     room.replay = [False, False]
     room.bot_volleys += 1
     rw = result["roundWinner"]
+    if not room.counted:
+        room.counted = True
+        stats.game_started()
     if rw in (0, 1):
         room.score[rw] += 1
     result["score"] = list(room.score)
@@ -702,6 +795,9 @@ def serve_static(method, target):
     if method not in ("GET", "HEAD"):
         return http_response(405, b"Method not allowed")
     path = unquote(urlsplit(target).path)
+    if path == "/stats.json":
+        body = json.dumps(stats.snapshot()).encode()
+        return http_response(200, b"" if method == "HEAD" else body, "application/json", "Cache-Control: no-store\r\n")
     if path.endswith("/"):
         path += "index.html"
     full = os.path.realpath(os.path.join(PUBLIC, path.lstrip("/")))
@@ -801,6 +897,8 @@ async def janitor():
             del ips[ip]
         for key in [k for k, t in _last_logged.items() if now - t > 300]:
             del _last_logged[key]
+        if stats.dirty:
+            stats.save()
 
 
 async def main(port):
@@ -813,7 +911,8 @@ async def main(port):
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, lambda *_: (stats.save(), os._exit(0)))     # a normal stop (or a host redeploy) keeps the totals
     try:
         asyncio.run(main(int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("PORT", 8000))))
     except KeyboardInterrupt:
-        pass
+        stats.save()

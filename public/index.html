@@ -17,8 +17,8 @@
 
   /* the game window: playfield + control strip. It scales to fit the screen by height as well as width. */
   #stage { display: flex; flex-direction: column; align-items: center; width: 100%; }
-  #mac { width: min(100vw, 1200px, calc((100vh - 16px) / 0.76)); }
-  @supports (height: 100dvh) { #mac { width: min(100vw, 1200px, calc((100dvh - 16px) / 0.76)); } }
+  #mac { width: min(100vw, 1200px, calc((100vh - 16px) / 0.81)); }
+  @supports (height: 100dvh) { #mac { width: min(100vw, 1200px, calc((100dvh - 16px) / 0.81)); } }
   #window { border: 2px solid #000; background: #fff; }
   #field { position: relative; border-bottom: 2px solid #000; }
   canvas { display: block; width: 100%; height: auto; }
@@ -86,19 +86,19 @@
   body.touch .t-act #tReplay { flex: 1; min-height: 56px; }
   body.touch .t-act .fire-row { flex: 2; }
   /* portrait phone: the game on top, the touch pad underneath */
-  body.touch #mac { width: min(100vw, 1200px, calc((100vh - 16px - 196px) / 0.76)); }
-  @supports (height: 100dvh) { body.touch #mac { width: min(100vw, 1200px, calc((100dvh - 16px - 196px) / 0.76)); } }
+  body.touch #mac { width: min(100vw, 1200px, calc((100vh - 16px - 196px) / 0.81)); }
+  @supports (height: 100dvh) { body.touch #mac { width: min(100vw, 1200px, calc((100dvh - 16px - 196px) / 0.81)); } }
   /* landscape phone: angle and powder on the left of the game, Fire and Replay on the right */
   body.touch.land #stage { flex-direction: row; justify-content: center; align-items: center; gap: 8px; padding: 0 6px; }
   body.touch.land .t-aim { order: 0; width: 172px; }
-  body.touch.land #mac { order: 1; width: min(calc(100vw - 384px), 1200px, calc((100vh - 16px) / 0.76)); }
+  body.touch.land #mac { order: 1; width: min(calc(100vw - 384px), 1200px, calc((100vh - 16px) / 0.81)); }
   body.touch.land .t-act { order: 2; width: 172px; flex-direction: column-reverse; }
   body.touch.land #tFire, body.touch.land #tReplay { font-size: 15px; white-space: nowrap; }
   body.touch.land .t-act #tReplay { flex: none; min-height: 46px; }
   body.touch.land .t-act .fire-row { flex: none; }
   body.touch.land .stepper { grid-template-columns: 46px minmax(0, 1fr) 46px; gap: 5px; }
   body.touch.land .stepper .val b { font-size: 17px; }
-  @supports (height: 100dvh) { body.touch.land #mac { width: min(calc(100vw - 384px), 1200px, calc((100dvh - 16px) / 0.76)); } }
+  @supports (height: 100dvh) { body.touch.land #mac { width: min(calc(100vw - 384px), 1200px, calc((100dvh - 16px) / 0.81)); } }
 
   /* Mac dialog boxes */
   .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
@@ -132,6 +132,8 @@
   #lobby select:disabled { color: #888; border-color: #888; }
   #lobbyMsg { position: absolute; left: 1.2em; bottom: 1.2em; max-width: 24em; margin: 0; padding: .5em .8em; background: #fff; border: 2px solid #000; color: #b00; font-weight: bold; }
   #lobbyMsg:empty { display: none; }
+  #stats { position: absolute; left: 0; right: 0; bottom: .7em; margin: 0 auto; width: max-content; max-width: 94vw; padding: .35em .9em; text-align: center;
+           background: rgba(0, 0, 0, .6); color: #f3e6c8; font-size: .62em; letter-spacing: .06em; line-height: 1.6; white-space: pre-line; pointer-events: none; }
   #waiting { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: calc(12px * var(--u)); }
 </style>
 </head>
@@ -140,7 +142,7 @@
   <div id="mac">
     <div id="window">
       <div id="field">
-        <canvas id="c" width="1200" height="780"></canvas>
+        <canvas id="c" width="1200" height="840"></canvas>
 
         <form id="chatForm" class="hidden right" autocomplete="off">
           <input id="chatInput" type="text" maxlength="120" placeholder="Type to chat, press Enter" disabled>
@@ -177,6 +179,7 @@
             </div>
           </div>
           <p id="lobbyMsg"></p>
+          <div id="stats" class="hidden"></div>
         </div>
 
         <div id="gameover" class="overlay hidden">

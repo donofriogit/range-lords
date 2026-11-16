@@ -1,5 +1,5 @@
 (() => {
-  const W = 1000, H = 650, B = 10;
+  const W = 1000, H = 700, B = 10;
   const TEAM = [{ name: 'Blue', color: '#2a58d8' }, { name: 'Red', color: '#d82a2a' }];
   const FONT = 'Chicago, Geneva, "Lucida Grande", sans-serif';
   const MAX_POWDER = 256, MIN_POWDER = 10, DEFAULT_AIM = { angle: 60, power: 192 };
@@ -514,6 +514,23 @@
     if (mode === 'online') $('goText').textContent += '\n(Waiting for opponent...)';
   });
 
+  // Title-screen stats, refreshed while the title screen is up.
+  const fmt = (n) => Number(n).toLocaleString();
+  async function loadStats() {
+    if ($('lobby').classList.contains('hidden')) return;
+    try {
+      const r = await fetch('stats.json', { cache: 'no-store' });
+      if (!r.ok) throw new Error('no stats');
+      const st = await r.json();
+      $('stats').textContent = `PLAYING NOW: ${fmt(st.playingNow)}    GAMES TODAY: ${fmt(st.gamesToday)}    TOTAL GAMES PLAYED: ${fmt(st.totalGames)}`;
+      $('stats').classList.remove('hidden');
+    } catch (e) {
+      $('stats').classList.add('hidden');
+    }
+  }
+  loadStats();
+  setInterval(loadStats, 30000);
+
   // ---------------------------------------------------------------- drawing
 
   function drawSky() {
@@ -532,7 +549,7 @@
   function updateClouds(dt) {
     const wind = state ? state.wind : 0;
     windVis += (wind - windVis) * Math.min(1, dt * 1.5);
-    const speed = windVis * 3.5 + (Math.abs(windVis) < 1 ? 4 : 0);
+    const speed = windVis * 2 + (Math.abs(windVis) < 1 ? 4 : 0);
     for (const c of clouds) {
       c.x += speed * c.s * dt;
       if (c.x > W + 120) c.x = -150;
@@ -720,7 +737,7 @@
 
     const cx = IW / 2, w = windVis;
     g.lineWidth = 2; g.strokeStyle = '#000'; g.beginPath(); g.moveTo(cx, 8); g.lineTo(cx, IH - 3); g.stroke();
-    const len = Math.abs(w) < 0.5 ? 6 : 6 + Math.abs(w) * 1.5, fx = w < 0 ? cx - len : cx + 1;
+    const len = Math.abs(w) < 0.5 ? 6 : 6 + Math.abs(w) * 0.63, fx = w < 0 ? cx - len : cx + 1;
     g.fillStyle = '#e02020'; g.fillRect(fx, 8, len, 8);
     g.lineWidth = 1; g.strokeRect(fx + 0.5, 8.5, len - 1, 7);
     g.fillStyle = '#000'; g.font = `10px ${FONT}`; g.textAlign = 'left';
