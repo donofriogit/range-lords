@@ -13,6 +13,7 @@ import math
 import mimetypes
 import os
 import random
+import subprocess
 import signal
 import struct
 import sys
@@ -35,6 +36,7 @@ REPLAY_SPEED = 3          # replays play this many times faster than the live sl
 ROUND_END_PAUSE = 5.0     # seconds the result stays up before the next round starts (time to ask for a replay)
 TSTEP = 5                 # terrain sample spacing
 MAX_FLIGHT_STEPS = int(20 / DT)
+LOWEST_GROUND = 636        # just above the three lines of chat text drawn along the bottom of the field
 MAX_WIND = 80              # strong enough to blow a high lob right back toward the shooter
 TARGET = 4                # rounds needed to win the best-of-7 match
 SELF_SAFE_STEPS = 12      # a fresh shell ignores its own castle briefly so it can clear the walls
@@ -65,7 +67,7 @@ def pick_levels(rng):
         diff = rng.uniform(60, 200)
     else:
         diff = rng.uniform(200, 490)
-    low = rng.uniform(110 + diff, 600)
+    low = rng.uniform(110 + diff, LOWEST_GROUND)
     levels = [low - diff, low]
     if rng.random() < 0.5:
         levels.reverse()
@@ -552,9 +554,24 @@ class Stats:
     def snapshot(self):
         today = time.strftime("%Y-%m-%d", time.gmtime())
         playing = sum(isinstance(c, Client) for r in rooms.values() if r.state for c in r.clients)
-        return {"playingNow": playing, "gamesToday": self.days.get(today, 0), "totalGames": self.total}
+        return {"playingNow": playing, "gamesToday": self.days.get(today, 0), "totalGames": self.total, "version": VERSION}
 
 
+def find_version():
+    """Short git commit hash: Render sets RENDER_GIT_COMMIT; locally ask git (a trailing + means uncommitted changes)."""
+    commit = os.environ.get("RENDER_GIT_COMMIT", "").strip()
+    if commit:
+        return commit[:7]
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        run = lambda *a: subprocess.run(["git", *a], cwd=here, capture_output=True, text=True, timeout=5)
+        head = run("rev-parse", "--short=7", "HEAD").stdout.strip()
+        return head + ("+" if head and run("status", "--porcelain").stdout.strip() else "") or "dev"
+    except (OSError, subprocess.SubprocessError):
+        return "dev"
+
+
+VERSION = find_version()
 stats = Stats(STATS_FILE)
 
 rooms = {}

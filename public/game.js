@@ -522,7 +522,7 @@
       const r = await fetch('stats.json', { cache: 'no-store' });
       if (!r.ok) throw new Error('no stats');
       const st = await r.json();
-      $('stats').textContent = `PLAYING NOW: ${fmt(st.playingNow)}    GAMES TODAY: ${fmt(st.gamesToday)}    TOTAL GAMES PLAYED: ${fmt(st.totalGames)}`;
+      $('stats').textContent = `PLAYING NOW: ${fmt(st.playingNow)}    GAMES TODAY: ${fmt(st.gamesToday)}    TOTAL GAMES PLAYED: ${fmt(st.totalGames)}${st.version ? `    BUILD: ${st.version}` : ''}`;
       $('stats').classList.remove('hidden');
     } catch (e) {
       $('stats').classList.add('hidden');
@@ -664,7 +664,7 @@
   }
 
   // Chat as plain text on the green ground under your own castle (right-aligned if you are the right castle).
-  // Newest line at the bottom, at most four lines; each message fades out after about ten seconds.
+  // Newest line at the bottom, at most three lines; each message fades out after about ten seconds.
   function drawChatOutput(now) {
     chatMsgs = chatMsgs.filter((m) => now - m.born < 13000);
     if (!chatMsgs.length || mode !== 'online') return;
@@ -678,7 +678,7 @@
       }
       rows.push({ text: line, alpha });
     }
-    rows.slice(-4).forEach((r, k, shown) => {
+    rows.slice(-3).forEach((r, k, shown) => {
       const y = H - 14 - (shown.length - 1 - k) * 17;
       ctx.globalAlpha = Math.max(0, r.alpha);
       ctx.fillStyle = '#063d14'; ctx.fillText(r.text, x + 1, y + 1);
