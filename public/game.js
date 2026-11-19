@@ -23,7 +23,7 @@
   let particles = [], shake = 0;
   let debris = [], rubble = [];                // flying chunks, and chunks that have come to rest this round
   let windVis = 0;                             // smoothed wind used to push clouds, flags and the wind vane
-  let hard = false, divots = [], windMode = 'constant', optionsLocked = false, closedByServer = false;
+  let hard = false, cloudsOn = true, divots = [], windMode = 'constant', optionsLocked = false, closedByServer = false;
   let scale = 1.2;                             // backing-store pixels per world unit
   const aim = [{ ...DEFAULT_AIM }, { ...DEFAULT_AIM }];
   let hist = [[], []];                         // shots each player has fired, oldest first
@@ -102,6 +102,7 @@
         resetReplay();
         you = m.you; state = m.state; score = m.score; round = m.round; target = m.target; mode = m.mode;
         hard = !!m.hard; $('modeSelect').value = hard ? 'hard' : 'easy'; divots = [];
+        cloudsOn = m.clouds !== false; $('cloudsSelect').value = cloudsOn ? 'on' : 'off';
         applyWindMode(m.windMode); $('bestOf').value = String(m.target * 2 - 1); lockOptions(true);
         firedMe = oppFired = false; vol = null; roundEnded = false; over = false; seriesWinner = null;
         banner = ''; trails = []; particles = []; debris = []; rubble = []; divots = [];
@@ -515,6 +516,7 @@
     $('windSelect').disabled = locked;
     $('bestOf').disabled = locked;
     $('modeSelect').disabled = locked;
+    $('cloudsSelect').disabled = locked;
   }
 
   // The options box lines up with the top of the Local Game button, whatever the window size.
@@ -528,12 +530,37 @@
   if ('ResizeObserver' in window) new ResizeObserver(alignOptions).observe($('lobby'));
   requestAnimationFrame(alignOptions);
 
-  $('windSelect').addEventListener('change', () => applyWindMode($('windSelect').value));
+  // Remembers the host's last choice of wind, mode, clouds and best-of in this browser. Nothing is sent anywhere -
+  // it's a plain localStorage read/write, scoped to this page.
+  const PREFS_KEY = 'rangeLordsPrefs';
+  function savePrefs() {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify({
+        wind: $('windSelect').value, mode: $('modeSelect').value,
+        clouds: $('cloudsSelect').value, bestOf: $('bestOf').value,
+      }));
+    } catch (err) { /* private browsing or a full/disabled store: preferences just won't persist */ }
+  }
+  function loadPrefs() {
+    let p;
+    try { p = JSON.parse(localStorage.getItem(PREFS_KEY)); } catch (err) { return; }
+    if (!p) return;
+    if (p.wind) applyWindMode(p.wind);
+    if (p.mode) $('modeSelect').value = p.mode;
+    if (p.clouds) $('cloudsSelect').value = p.clouds;
+    if (p.bestOf) $('bestOf').value = p.bestOf;
+  }
+
+  $('windSelect').addEventListener('change', () => { applyWindMode($('windSelect').value); savePrefs(); });
+  $('modeSelect').addEventListener('change', savePrefs);
+  $('cloudsSelect').addEventListener('change', savePrefs);
+  $('bestOf').addEventListener('change', savePrefs);
   applyWindMode('constant');
+  loadPrefs();
 
   const startGame = (kind) => {
     lockOptions(true);
-    connect(() => send({ type: 'create', mode: kind, windMode, difficulty: $('modeSelect').value, bestOf: +$('bestOf').value }));
+    connect(() => send({ type: 'create', mode: kind, windMode, difficulty: $('modeSelect').value, clouds: $('cloudsSelect').value !== 'off', bestOf: +$('bestOf').value }));
   };
   $('onlineBtn').addEventListener('click', () => startGame('online'));
   $('localBtn').addEventListener('click', () => startGame('local'));
@@ -573,7 +600,7 @@
 
   function drawSky() {
     ctx.fillStyle = '#80dfff'; ctx.fillRect(0, 0, W, H);
-    for (const c of clouds) {
+    if (cloudsOn) for (const c of clouds) {
       const rects = [[0, 0, 70, 16], [12, -10, 40, 14], [-10, 8, 90, 12]];
       for (const [color, e] of [['#000', 1.5], ['#fff', 0]]) {
         ctx.fillStyle = color;
@@ -585,6 +612,7 @@
   }
 
   function updateClouds(dt) {
+    if (!cloudsOn) return;
     const wind = state ? state.wind : 0;
     windVis += (wind - windVis) * Math.min(1, dt * 1.5);
     const speed = windVis * 2 + (Math.abs(windVis) < 1 ? 4 : 0);
@@ -790,7 +818,7 @@
       g.lineWidth = 1; g.strokeRect(fx + 0.5, 8.5, len - 1, 7);
     }
     g.fillStyle = '#000'; g.font = `10px ${FONT}`; g.textAlign = 'left';
-    g.fillText(state && !hard ? `Wind ${Math.abs(state.wind)}${windMode === 'constant' ? ' (constant)' : ''}` : hard && state ? 'Wind: watch the clouds' : 'Wind', cx + 40, 30);
+    g.fillText(state && !hard ? `Wind ${Math.abs(state.wind)}${windMode === 'constant' ? ' (constant)' : ''}` : hard && state ? (cloudsOn ? 'Wind: watch the clouds' : 'Wind: unknown') : 'Wind', cx + 40, 30);
   }
 
   // ---------------------------------------------------------------- main loop

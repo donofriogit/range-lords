@@ -469,6 +469,7 @@ class Room:
         self.score = [0, 0]
         self.round = 0
         self.hard = False               # hard mode: no history, no wind readout, and the opponent's aim is hidden
+        self.clouds = True              # decorative in easy mode; the only wind tell in hard mode
         self.wind_mode = "constant"     # "constant": fixed for the round; "variable": new wind after every volley
         self.pending = [None, None]     # locked-in (angle, grains) per player
         self.round_over = False         # a keep fell; waiting for the next round to begin
@@ -499,7 +500,7 @@ class Room:
         mode = "computer" if self.bot else "local" if self.local else "online"
         for i, cl in enumerate(self.clients):
             cl.send({"type": "start", "you": i, "state": self.state, "windMode": self.wind_mode,
-                     "score": self.score, "round": self.round, "target": self.target, "mode": mode, "hard": self.hard})
+                     "score": self.score, "round": self.round, "target": self.target, "mode": mode, "hard": self.hard, "clouds": self.clouds})
 
     def new_match(self):
         self.score, self.round, self.over = [0, 0], 0, False
@@ -681,6 +682,7 @@ def handle_message(client, msg):
         if msg.get("windMode") in WIND_MODES:
             room.wind_mode = msg["windMode"]
         room.hard = msg.get("difficulty") == "hard"
+        room.clouds = msg.get("clouds") is not False   # default on; off only when the client says so explicitly
         if type(msg.get("bestOf")) is int and msg["bestOf"] in (3, 5, 7, 9):
             room.target = (msg["bestOf"] + 1) // 2
         rooms[room.code] = room
