@@ -52,7 +52,7 @@
   .arr:disabled { color: #aaa; cursor: default; }
   .side.theirs .arr { visibility: hidden; }
   .score { margin: 0 calc(6px * var(--u)); white-space: nowrap; }
-  small.prev { font-size: calc(8px * var(--u)); line-height: 1; color: #555; min-width: calc(34px * var(--u)); white-space: nowrap; }
+  small.prev { font-size: calc(8px * var(--u)); line-height: 1.1; color: #555; min-width: calc(34px * var(--u)); white-space: pre; }
   .pname { flex: 1; text-align: center; font-weight: bold; white-space: nowrap; }
   .stripbtn { height: calc(21px * var(--u)); padding: 0 calc(12px * var(--u)); border: 2px solid #000; border-radius: calc(10px * var(--u)); background: #fff;
               font-weight: bold; cursor: pointer; white-space: nowrap; text-align: center; }
@@ -63,7 +63,6 @@
   .stripbtn:disabled { color: #888; border-color: #888; cursor: default; }
   .lock { width: calc(14px * var(--u)); height: calc(16px * var(--u)); margin-left: calc(6px * var(--u)); visibility: hidden; flex: none; }
   .lock.on { visibility: visible; }
-  #icons { border-top: 1px solid #000; }
 
   /* hover styling only where there is a real hover, so taps on a phone don't leave buttons stuck inverted */
   @media (hover: hover) {
@@ -96,7 +95,7 @@
   #tFire, #tReplay { font-size: 18px; }
   .fire-row { display: flex; align-items: center; gap: 8px; }
   .fire-row #tFire { flex: 1; min-height: 56px; }
-  .fire-row .lock { width: 22px; height: 26px; margin: 0; }
+  .fire-row .lock { width: 22px; height: 26px; margin: 0; filter: invert(1); }   /* the pad sits on black, so draw the lock in white */
   body.touch .hint, body.touch #strip .stripbtn, body.touch #strip .lock, body.touch .side .arr { display: none; }
   body.touch .tpad { display: flex; flex-direction: column; gap: 6px; }
   body.touch #stage { gap: 6px; }
@@ -111,6 +110,8 @@
   body.touch.land #stage { flex-direction: row; justify-content: center; align-items: center; gap: 8px; padding: 0 6px; }
   body.touch.land .t-aim { order: 0; width: 172px; }
   body.touch.land #mac { order: 1; width: min(calc(100vw - 384px), 1200px, calc((100vh - 16px) / 0.81)); }
+  body.touch.land.seat-right .t-aim { order: 2; }      /* playing the right-hand castle: angle and powder go on the right, beside it */
+  body.touch.land.seat-right .t-act { order: 0; }
   body.touch.land .t-act { order: 2; width: 172px; flex-direction: column-reverse; }
   body.touch.land #tFire, body.touch.land #tReplay { font-size: 15px; white-space: nowrap; }
   body.touch.land .t-act #tReplay { flex: none; min-height: 46px; }
@@ -194,6 +195,7 @@
             <aside class="opts">
               <b>Game options</b>
               <label>Wind <select id="windSelect"><option value="variable">Variable</option><option value="constant" selected>Constant</option></select></label>
+              <label>Mode <select id="modeSelect"><option value="easy" selected>Easy</option><option value="hard">Hard</option></select></label>
               <label>Best of <select id="bestOf"><option value="3">3</option><option value="5">5</option><option value="7" selected>7</option><option value="9">9</option></select></label>
             </aside>
           </div>

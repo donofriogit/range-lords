@@ -23,7 +23,7 @@
   let particles = [], shake = 0;
   let debris = [], rubble = [];                // flying chunks, and chunks that have come to rest this round
   let windVis = 0;                             // smoothed wind used to push clouds, flags and the wind vane
-  let windMode = 'constant', optionsLocked = false, closedByServer = false;
+  let hard = false, divots = [], windMode = 'constant', optionsLocked = false, closedByServer = false;
   let scale = 1.2;                             // backing-store pixels per world unit
   const aim = [{ ...DEFAULT_AIM }, { ...DEFAULT_AIM }];
   let hist = [[], []];                         // shots each player has fired, oldest first
@@ -77,7 +77,8 @@
     ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
     ws.onopen = onOpen;
     ws.onmessage = (e) => onMessage(JSON.parse(e.data));
-    ws.onclose = () => {
+    ws.onclose = (e) => {
+      console.warn('socket closed', e.code, e.reason, 'clean:', e.wasClean);
       setChatEnabled(false);
       if (closedByServer) return;
       if (state && !over) { $('left').querySelector('h2').textContent = 'Connection lost'; show('left'); }
@@ -95,14 +96,15 @@
       case 'created':
         hide('lobbyMenu'); show('waiting');
         $('code').textContent = m.code;
-        $('windLocked').textContent = `${windMode === 'constant' ? 'Constant' : 'Variable'} wind - best of ${$('bestOf').value}`;
+        $('windLocked').textContent = `${windMode === 'constant' ? 'Constant' : 'Variable'} wind - ${$('modeSelect').value === 'hard' ? 'hard' : 'easy'} mode - best of ${$('bestOf').value}`;
         break;
       case 'start':
         resetReplay();
         you = m.you; state = m.state; score = m.score; round = m.round; target = m.target; mode = m.mode;
+        hard = !!m.hard; $('modeSelect').value = hard ? 'hard' : 'easy'; divots = [];
         applyWindMode(m.windMode); $('bestOf').value = String(m.target * 2 - 1); lockOptions(true);
         firedMe = oppFired = false; vol = null; roundEnded = false; over = false; seriesWinner = null;
-        banner = ''; trails = []; particles = []; debris = []; rubble = [];
+        banner = ''; trails = []; particles = []; debris = []; rubble = []; divots = [];
         localSeat = 0; maskedSeat = -1; replayPressed = oppReplay = false;
         roundStart = JSON.parse(JSON.stringify(m.state)); roundVolleys = [];
         if (round === 1) { aim[0] = { ...DEFAULT_AIM }; aim[1] = { ...DEFAULT_AIM }; hist = [[], []]; chatMsgs = []; lastRound = null; }
@@ -110,6 +112,12 @@
         hide('lobby'); hide('gameover'); document.body.classList.remove('menu');
         showChat(mode === 'online');
         syncControls();
+        break;
+      case 'aim':
+        if (mode === 'online' && m.player !== you && !vol && !replaying && !roundEnded && !over) {
+          aim[m.player] = { angle: m.angle, power: m.power };
+          syncControls();
+        }
         break;
       case 'fired':
         if (mode === 'online' && m.player !== you) oppFired = true;
@@ -201,6 +209,8 @@
       const e = m.events[vol.applied++];
       applyGrids(e.castles);
       explosion(e.impact[0], e.impact[1]);
+      const [ix, iy] = e.impact;
+      if (ix > 0 && ix < W && iy >= groundAt(ix) - 0.3) divots.push({ x: ix, y: groundAt(ix) });   // a shell that hit the ground leaves a divot
     }
     if (f >= Math.max(...m.shots.map((s) => s.path.length)) + 4) finishVolley();
   }
@@ -209,7 +219,7 @@
     const m = vol.m, isReplay = vol.replay;
     m.castles.forEach((g, i) => { state.castles[i].grid = g; });
     state.wind = m.wind;
-    m.shots.forEach((s, i) => trails.push({ path: s.path, player: i }));
+    if (!hard) m.shots.forEach((s, i) => trails.push({ path: s.path, player: i }));   // hard mode: the divots are the only record
     trails = trails.slice(-6);
     vol = null;
     if (isReplay) { replayAdvance(); return; }
@@ -219,7 +229,7 @@
       roundEnded = true;
       lastRound = { start: roundStart, volleys: roundVolleys, round };
       const w = m.roundWinner;
-      banner = w === -1 ? 'Both castles fell - draw! The round restarts...'
+      banner = w === -1 ? 'Both castles fell - a point each! The round restarts...'
         : mode === 'local' ? `${TEAM[w].name} wins the round!`
         : w === you ? 'You win the round!' : `${mode === 'computer' ? 'Computer' : 'Opponent'} wins the round!`;
     }
@@ -232,7 +242,7 @@
 
   function showGameOver() {
     const local = mode === 'local';
-    const headline = local ? `${TEAM[seriesWinner].name} wins the match!` : seriesWinner === you ? 'Victory!' : 'Defeat';
+    const headline = seriesWinner === -1 ? 'Draw!' : local ? `${TEAM[seriesWinner].name} wins the match!` : seriesWinner === you ? 'Victory!' : 'Defeat';
     const [a, b] = local ? [score[0], score[1]] : [score[you], score[1 - you]];
     $('goText').textContent = `${headline}\n${a} - ${b}`;
     $('rematchBtn').disabled = false;
@@ -247,9 +257,9 @@
     if (!lastRound || vol || replaying) return;
     replayPressed = oppReplay = false;
     hide('gameover');
-    replaying = { k: 0, timer: null, saved: { state, trails, rubble, debris, banner, windVis, aim: [{ ...aim[0] }, { ...aim[1] }] } };
+    replaying = { k: 0, timer: null, saved: { state, divots, trails, rubble, debris, banner, windVis, aim: [{ ...aim[0] }, { ...aim[1] }] } };
     state = JSON.parse(JSON.stringify(lastRound.start));
-    trails = []; rubble = []; debris = []; particles = []; banner = ''; windVis = state.wind;
+    trails = []; rubble = []; divots = []; debris = []; particles = []; banner = ''; windVis = state.wind;
     playReplayVolley();
   }
 
@@ -269,7 +279,7 @@
     const s = replaying.saved;
     clearTimeout(replaying.timer);
     replaying = null; vol = null; particles = [];
-    state = s.state; trails = s.trails; rubble = s.rubble; debris = s.debris; banner = s.banner; windVis = s.windVis;
+    state = s.state; divots = s.divots; trails = s.trails; rubble = s.rubble; debris = s.debris; banner = s.banner; windVis = s.windVis;
     aim[0] = s.aim[0]; aim[1] = s.aim[1];
   }
 
@@ -371,10 +381,12 @@
 
   function syncControls() {
     const act = me(), local = mode === 'local';
+    document.body.classList.toggle('seat-right', !!state && act === 1 && !local);   // phone landscape: dials sit beside your own castle
     for (const i of [0, 1]) {
       const masked = local && maskedSeat === i;     // a locked-in shot stays secret on a shared screen
-      setText('ang' + i, masked ? '--' : Math.round(aim[i].angle) + '°');
-      setText('pow' + i, masked ? '--' : Math.round(aim[i].power) + 'g');
+      const hide = masked || (hard && mode === 'online' && i !== you);     // hard mode: the opponent's settings stay secret
+      setText('ang' + i, hide ? '--' : Math.round(aim[i].angle) + '°');
+      setText('pow' + i, hide ? '--' : Math.round(aim[i].power) + 'g');
       setText('sc' + i, score[i]);
       $('side' + i).classList.toggle('theirs', i !== act);
       setText('pname' + i, nameOf(i) + (local ? (state && i === act && canAim() ? ' (aiming)' : '') : (i === you ? ' (you)' : '')));
@@ -383,8 +395,10 @@
       let p = null;
       if (local) { if (i === act && !masked) p = hist[i][hist[i].length - 1]; }
       else p = hist[i][hist[i].length - (i === you ? 1 : 2)];
-      setText('pa' + i, p ? `prev ${Math.round(p.angle)}°` : '');
-      setText('pp' + i, p ? `prev ${Math.round(p.power)}g` : '');
+      setText('pa' + i, p && !hard ? `prev ${Math.round(p.angle)}°` : '');
+      // running log of powder settings, oldest first (a shared screen only shows the side that is aiming)
+      const log = hard || (local && !(i === act && !masked)) ? [] : hist[i].slice(-3).reverse().map((h) => Math.round(h.power));   // newest first, stacked downwards
+      setText('pp' + i, log.map((v) => v + 'g').join('\n'));
     }
     const on = canAim(), rp = canReplay();
     document.querySelectorAll(HOLD).forEach((b) => { b.disabled = !on; });
@@ -409,6 +423,18 @@
     if (!canAim()) { stopHold(); return; }
     aim[me()] = { angle: Math.min(85, Math.max(5, angle)), power: Math.min(MAX_POWDER, Math.max(MIN_POWDER, power)) };
     syncControls();
+    if (mode === 'online') queueAimSend();
+  }
+
+  // Online, each player's dials are shown to the other live. Sends are throttled; the last value always goes out.
+  let aimTimer = null, aimLast = 0;
+  function queueAimSend() {
+    if (aimTimer) return;
+    aimTimer = setTimeout(() => {
+      aimTimer = null; aimLast = performance.now();
+      const a = aim[you];
+      if (canAim()) send({ type: 'aim', angle: a.angle, power: a.power });
+    }, Math.max(0, 120 - (performance.now() - aimLast)));
   }
 
   function doFire() {
@@ -488,14 +514,26 @@
     optionsLocked = locked;
     $('windSelect').disabled = locked;
     $('bestOf').disabled = locked;
+    $('modeSelect').disabled = locked;
   }
+
+  // The options box lines up with the top of the Local Game button, whatever the window size.
+  function alignOptions() {
+    const lobby = $('lobby'), btn = $('localBtn'), box = document.querySelector('#lobbyMenu .opts');
+    if (lobby.classList.contains('hidden') || !btn.offsetHeight) return;
+    box.style.top = Math.round(btn.getBoundingClientRect().top - lobby.getBoundingClientRect().top) + 'px';
+  }
+  window.addEventListener('resize', alignOptions);
+  window.addEventListener('load', alignOptions);
+  if ('ResizeObserver' in window) new ResizeObserver(alignOptions).observe($('lobby'));
+  requestAnimationFrame(alignOptions);
 
   $('windSelect').addEventListener('change', () => applyWindMode($('windSelect').value));
   applyWindMode('constant');
 
   const startGame = (kind) => {
     lockOptions(true);
-    connect(() => send({ type: 'create', mode: kind, windMode, bestOf: +$('bestOf').value }));
+    connect(() => send({ type: 'create', mode: kind, windMode, difficulty: $('modeSelect').value, bestOf: +$('bestOf').value }));
   };
   $('onlineBtn').addEventListener('click', () => startGame('online'));
   $('localBtn').addEventListener('click', () => startGame('local'));
@@ -568,6 +606,15 @@
     ctx.strokeStyle = '#000'; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.stroke();
   }
 
+  // Dents in the ground where earlier shells landed this round.
+  function drawDivots() {
+    for (const d of divots) {
+      ctx.beginPath(); ctx.ellipse(d.x, d.y, 7, 3.5, 0, 0, Math.PI);
+      ctx.closePath(); ctx.fillStyle = '#4a2f12'; ctx.fill();
+      ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
+    }
+  }
+
   function drawCastle(i) {
     const c = state.castles[i];
     c.grid.forEach((col, ci) => {
@@ -591,9 +638,9 @@
 
     // flag on the merlon opposite the cannon, streaming downwind
     const fc = c.keepCol === 0 ? 2 : 0, stack = c.grid[fc].length;
-    if (stack) {
+    if (stack && !hard) {      // hard mode: no flag, judge the wind by the clouds
       const px = c.x0 + fc * B + B / 2, top = c.baseY - stack * B;
-      const dir = Math.abs(windVis) < 2 ? (i ? -1 : 1) : Math.sign(windVis);
+      const dir = hard || Math.abs(windVis) < 2 ? (i ? -1 : 1) : Math.sign(windVis);
       ctx.strokeStyle = '#000'; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(px + 0.5, top); ctx.lineTo(px + 0.5, top - 13); ctx.stroke();
       const fx = dir > 0 ? px + 1 : px - 7;
@@ -735,13 +782,15 @@
       drawPowderPile(g, px0 + 23, IH - 5, aim[i].power / MAX_POWDER);
     }
 
-    const cx = IW / 2, w = windVis;
-    g.lineWidth = 2; g.strokeStyle = '#000'; g.beginPath(); g.moveTo(cx, 8); g.lineTo(cx, IH - 3); g.stroke();
+    const cx = IW / 2, w = hard ? 0 : windVis;
     const len = Math.abs(w) < 0.5 ? 6 : 6 + Math.abs(w) * 0.63, fx = w < 0 ? cx - len : cx + 1;
-    g.fillStyle = '#e02020'; g.fillRect(fx, 8, len, 8);
-    g.lineWidth = 1; g.strokeRect(fx + 0.5, 8.5, len - 1, 7);
+    if (!hard) {
+      g.lineWidth = 2; g.strokeStyle = '#000'; g.beginPath(); g.moveTo(cx, 8); g.lineTo(cx, IH - 3); g.stroke();
+      g.fillStyle = '#e02020'; g.fillRect(fx, 8, len, 8);
+      g.lineWidth = 1; g.strokeRect(fx + 0.5, 8.5, len - 1, 7);
+    }
     g.fillStyle = '#000'; g.font = `10px ${FONT}`; g.textAlign = 'left';
-    g.fillText(state ? `Wind ${Math.abs(state.wind)}${windMode === 'constant' ? ' (constant)' : ''}` : 'Wind', cx + 40, 30);
+    g.fillText(state && !hard ? `Wind ${Math.abs(state.wind)}${windMode === 'constant' ? ' (constant)' : ''}` : hard && state ? 'Wind: watch the clouds' : 'Wind', cx + 40, 30);
   }
 
   // ---------------------------------------------------------------- main loop
@@ -760,6 +809,7 @@
     drawSky();
     drawTerrain(state ? state.terrain : demoTerrain);
     if (state) {
+      drawDivots();
       for (const r of rubble) drawChunk(r.x, r.y, r.size, r.stone);
       drawCastle(0); drawCastle(1);
       drawTrails();

@@ -9,6 +9,7 @@ import copy
 import hashlib
 import ipaddress
 import json
+import traceback
 import math
 import mimetypes
 import os
@@ -35,6 +36,7 @@ PLAYBACK_RATE = 15        # path points shown per second; the physics samples 60
 REPLAY_SPEED = 3          # replays play this many times faster than the live slow motion
 ROUND_END_PAUSE = 5.0     # seconds the result stays up before the next round starts (time to ask for a replay)
 TSTEP = 5                 # terrain sample spacing
+OFFSCREEN = 600            # how far past either side a shell is followed (the client tracks it with an edge marker)
 MAX_FLIGHT_STEPS = int(20 / DT)
 LOWEST_GROUND = 636        # just above the three lines of chat text drawn along the bottom of the field
 MAX_WIND = 80              # strong enough to blow a high lob right back toward the shooter
@@ -67,7 +69,7 @@ def pick_levels(rng):
         diff = rng.uniform(60, 200)
     else:
         diff = rng.uniform(200, 490)
-    low = rng.uniform(110 + diff, LOWEST_GROUND)
+    low = LOWEST_GROUND      # the low side always sits at the lowest ground there is, so the shell arcs stay in view
     levels = [low - diff, low]
     if rng.random() < 0.5:
         levels.reverse()
@@ -148,7 +150,7 @@ def cannon_pos(c):
 
 def hit(state, x, y, skip=None):
     """What a shell at (x, y) is touching: None, -1 for the ground, or the index of the castle it struck."""
-    if 0 <= x <= W and y >= ground_y(state["terrain"], x):
+    if y >= ground_y(state["terrain"], x):     # past either side the ground continues level with the edge of the map
         return -1
     for idx, c in enumerate(state["castles"]):
         if idx == skip:
@@ -194,7 +196,7 @@ def volley(state, params, wind_mode="constant"):
             s["y"] += s["vy"] * DT
             if step % 2 == 1:
                 s["path"].append([round(s["x"], 1), round(s["y"], 1)])
-            if s["x"] < -60 or s["x"] > W + 60:
+            if s["x"] < -OFFSCREEN or s["x"] > W + OFFSCREEN:
                 s["active"] = False
             elif s["y"] > 0:
                 touched = hit(state, s["x"], s["y"], skip=i if step < SELF_SAFE_STEPS else None)
@@ -246,7 +248,7 @@ def trace(state, shooter, angle, power):
         vy += G * DT
         x += vx * DT
         y += vy * DT
-        if x < -60 or x > W + 60:
+        if x < -OFFSCREEN or x > W + OFFSCREEN:
             return None
         if y > 0:
             touched = hit(state, x, y, skip=shooter if step < SELF_SAFE_STEPS else None)
@@ -323,7 +325,7 @@ MAX_CONNECTIONS = 1500                 # open sockets in total
 MAX_CONNS_PER_IP = 10                  # open websockets per client address
 HTTP_BURST, HTTP_PER_SEC = 60, 3.0     # page and asset requests per address
 WS_BURST, WS_PER_SEC = 10, 0.5         # new websocket connections per address
-MSG_BURST, MSG_PER_SEC = 20, 8.0       # messages per websocket
+MSG_BURST, MSG_PER_SEC = 20, 12.0      # messages per websocket
 MSG_STRIKES = 40                       # dropped messages before we hang up on a connection
 CREATE_BURST, CREATE_PER_SEC = 6, 0.1  # games created per address
 MAX_ROOMS, MAX_ROOMS_PER_IP = 1000, 4
@@ -466,6 +468,7 @@ class Room:
         self.state = None
         self.score = [0, 0]
         self.round = 0
+        self.hard = False               # hard mode: no history, no wind readout, and the opponent's aim is hidden
         self.wind_mode = "constant"     # "constant": fixed for the round; "variable": new wind after every volley
         self.pending = [None, None]     # locked-in (angle, grains) per player
         self.round_over = False         # a keep fell; waiting for the next round to begin
@@ -496,7 +499,7 @@ class Room:
         mode = "computer" if self.bot else "local" if self.local else "online"
         for i, cl in enumerate(self.clients):
             cl.send({"type": "start", "you": i, "state": self.state, "windMode": self.wind_mode,
-                     "score": self.score, "round": self.round, "target": self.target, "mode": mode})
+                     "score": self.score, "round": self.round, "target": self.target, "mode": mode, "hard": self.hard})
 
     def new_match(self):
         self.score, self.round, self.over = [0, 0], 0, False
@@ -619,8 +622,15 @@ def handle_fire(room, client, msg):
         stats.game_started()
     if rw in (0, 1):
         room.score[rw] += 1
+    elif rw == -1:          # both keeps fell: a tie gives each player a point
+        room.score[0] += 1
+        room.score[1] += 1
     result["score"] = list(room.score)
-    result["seriesWinner"] = rw if rw in (0, 1) and room.score[rw] >= room.target else None
+    if rw == -1:
+        won = [i for i in (0, 1) if room.score[i] >= room.target]
+        result["seriesWinner"] = (won[0] if len(won) == 1 else -1) if won else None   # both reaching the target together is a drawn match
+    else:
+        result["seriesWinner"] = rw if rw in (0, 1) and room.score[rw] >= room.target else None
     room.round_over = rw is not None
     room.over = result["seriesWinner"] is not None
     for cl in room.clients:
@@ -670,6 +680,7 @@ def handle_message(client, msg):
         info.rooms += 1
         if msg.get("windMode") in WIND_MODES:
             room.wind_mode = msg["windMode"]
+        room.hard = msg.get("difficulty") == "hard"
         if type(msg.get("bestOf")) is int and msg["bestOf"] in (3, 5, 7, 9):
             room.target = (msg["bestOf"] + 1) // 2
         rooms[room.code] = room
@@ -698,6 +709,11 @@ def handle_message(client, msg):
 
     elif kind == "fire" and room:
         handle_fire(room, client, msg)
+
+    elif kind == "aim" and room and not room.hard and not room.bot and not room.local and room.clients[1]:
+        angle, power = num(msg.get("angle"), 0, 90), num(msg.get("power"), MIN_POWDER, MAX_POWDER)
+        if angle is not None and power is not None and room.pending[client.idx] is None and not room.round_over:
+            room.clients[1 - client.idx].send({"type": "aim", "player": client.idx, "angle": angle, "power": power})
 
     elif kind == "replay" and room:
         handle_replay(room, client)
@@ -879,8 +895,12 @@ async def handle_connection(reader, writer):
                 writer.write(serve_static(parts[0], parts[1]))
             await writer.drain()
     except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, asyncio.TimeoutError,
-            ConnectionError, OSError):
-        pass
+            ConnectionError, OSError) as e:
+        if client:
+            print(f"socket closed ({type(e).__name__}) room={getattr(client.room, 'code', None)} seat={client.idx}", flush=True)
+    except Exception:
+        print("unhandled error in connection:", flush=True)
+        traceback.print_exc()
     finally:
         open_conns -= 1
         if counted:
@@ -888,6 +908,7 @@ async def handle_connection(reader, writer):
         if ping_task:
             ping_task.cancel()
         if client:
+            print(f"disconnect room={getattr(client.room, 'code', None)} seat={client.idx} strikes={client.strikes}", flush=True)
             disconnect(client)
         try:
             writer.close()
