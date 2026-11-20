@@ -1,6 +1,6 @@
 (() => {
   const W = 1000, H = 700, B = 10;
-  const TEAM = [{ name: 'Blue', color: '#2a58d8' }, { name: 'Red', color: '#d82a2a' }];
+  const TEAM = [{ color: '#2a58d8' }, { color: '#d82a2a' }];   // the flags keep their colours; players are just "you" and "them"
   const FONT = 'Chicago, Geneva, "Lucida Grande", sans-serif';
   const MAX_POWDER = 256, MIN_POWDER = 10, DEFAULT_AIM = { angle: 60, power: 192 };
   const ICON_H = 46;
@@ -11,7 +11,7 @@
   const icons = $('icons'), ictx = icons.getContext('2d');
 
   let mode = 'online';                         // 'online' | 'computer' | 'local' (two people, one screen)
-  const nameOf = (i) => (i === 1 && mode === 'computer' ? 'Computer' : TEAM[i].name);
+  const nameOf = (i) => (i === 1 && mode === 'computer' ? 'Computer' : (mode === 'local' ? i === 0 : i === you) ? 'You' : 'Them');
 
   let ws = null;
   let you = null, state = null;
@@ -291,7 +291,7 @@
       lastRound = { start: roundStart, volleys: roundVolleys, round };
       const w = m.roundWinner;
       banner = w === -1 ? 'Both castles fell - a point each! The round restarts...'
-        : mode === 'local' ? `${TEAM[w].name} wins the round!`
+        : mode === 'local' ? (w === 0 ? 'You win the round!' : 'They win the round!')
         : w === you ? 'You win the round!' : `${mode === 'computer' ? 'Computer' : 'Opponent'} wins the round!`;
     }
     if (m.seriesWinner !== null) {
@@ -303,7 +303,7 @@
 
   function showGameOver() {
     const local = mode === 'local';
-    const headline = seriesWinner === -1 ? 'Draw!' : local ? `${TEAM[seriesWinner].name} wins the match!` : seriesWinner === you ? 'Victory!' : 'Defeat';
+    const headline = seriesWinner === -1 ? 'Draw!' : local ? (seriesWinner === 0 ? 'You win the match!' : 'They win the match!') : seriesWinner === you ? 'Victory!' : 'Defeat';
     const [a, b] = local ? [score[0], score[1]] : [score[you], score[1 - you]];
     $('goText').textContent = `${headline}\n${a} - ${b}`;
     $('rematchBtn').disabled = false;
@@ -450,7 +450,7 @@
       setText('pow' + i, hide ? '--' : Math.round(aim[i].power) + 'g');
       setText('sc' + i, score[i]);
       $('side' + i).classList.toggle('theirs', i !== act);
-      setText('pname' + i, nameOf(i) + (local ? (state && i === act && canAim() ? ' (aiming)' : '') : (i === you ? ' (you)' : '')));
+      setText('pname' + i, nameOf(i) + (local && state && i === act && canAim() ? ' (aiming)' : ''));
       // Tiny reminder of an earlier shot. Yours: the shot you last fired. Online, the opponent's main field already
       // shows their last shot, so theirs is the one before it.
       let p = null;
@@ -464,7 +464,7 @@
     const on = canAim(), rp = canReplay();
     document.querySelectorAll(HOLD).forEach((b) => { b.disabled = !on; });
     let label = firedMe ? 'Locked in' : 'Fire';
-    if (local && state && !firedMe) label = localSeat === 0 ? 'Blue: Lock in' : 'Red: Fire';
+    if (local && state && !firedMe) label = localSeat === 0 ? 'You: Lock in' : 'Them: Fire';
     const replayLabel = replayPressed ? 'Waiting...' : (oppReplay && rp ? 'Join replay' : 'Replay');
     for (const [id, enabled, text] of [['fireBtn', on, label], ['tFire', on, label], ['replayBtn', rp, replayLabel], ['tReplay', rp, replayLabel]]) {
       $(id).disabled = !enabled; setText(id, text);
@@ -474,7 +474,7 @@
     const a = state && aim[act];
     setText('tAng', a ? Math.round(a.angle) + '°' : '--');
     setText('tPow', a ? Math.round(a.power) + 'g' : '--');
-    setText('tWho', !state ? '' : local ? `${nameOf(act)} aiming` : `You are ${nameOf(you)}`);
+    setText('tWho', !state ? '' : local ? `${nameOf(act)} aiming` : '');
     // a lock beside Fire shows that the other player has locked in
     const oppLocked = !!state && !over && !roundEnded && (mode === 'online' ? oppFired : local && maskedSeat === 0);
     document.querySelectorAll('.lock').forEach((el) => el.classList.toggle('on', oppLocked));
@@ -504,7 +504,7 @@
     if (mode === 'local') {
       send({ type: 'fire', seat, angle: a.angle, power: a.power });
       if (seat === 0) {
-        // Blue is locked in: hide the numbers (and barrel) behind the last public shot until the volley.
+        // The first seat is locked in: hide the numbers (and barrel) behind the last public shot until the volley.
         const pub = hist[0][hist[0].length - 1] || DEFAULT_AIM;
         aim[0] = { angle: pub.angle, power: pub.power };
         maskedSeat = 0; localSeat = 1;
@@ -578,17 +578,6 @@
     $('modeSelect').disabled = locked;
     $('cloudsSelect').disabled = locked;
   }
-
-  // The options box lines up with the top of the Local Game button, whatever the window size.
-  function alignOptions() {
-    const lobby = $('lobby'), btn = $('localBtn'), box = document.querySelector('#lobbyMenu .opts');
-    if (lobby.classList.contains('hidden') || !btn.offsetHeight) return;
-    box.style.top = Math.round(btn.getBoundingClientRect().top - lobby.getBoundingClientRect().top) + 'px';
-  }
-  window.addEventListener('resize', alignOptions);
-  window.addEventListener('load', alignOptions);
-  if ('ResizeObserver' in window) new ResizeObserver(alignOptions).observe($('lobby'));
-  requestAnimationFrame(alignOptions);
 
   // Remembers the host's last choice of wind, mode, clouds and best-of in this browser. Nothing is sent anywhere -
   // it's a plain localStorage read/write, scoped to this page.
