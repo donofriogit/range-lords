@@ -641,13 +641,14 @@
 
   // Title-screen stats, refreshed while the title screen is up.
   const fmt = (n) => Number(n).toLocaleString();
+  const fmtBuild = (t) => new Date(t * 1000).toLocaleString([], { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   async function loadStats() {
     if ($('lobby').classList.contains('hidden')) return;
     try {
       const r = await fetch('stats.json', { cache: 'no-store' });
       if (!r.ok) throw new Error('no stats');
       const st = await r.json();
-      $('stats').textContent = `PLAYING NOW: ${fmt(st.playingNow)}    GAMES TODAY: ${fmt(st.gamesToday)}    TOTAL GAMES PLAYED: ${fmt(st.totalGames)}${st.version ? `    BUILD: ${st.version}` : ''}`;
+      $('stats').textContent = `PLAYING NOW: ${fmt(st.playingNow)}    GAMES TODAY: ${fmt(st.gamesToday)}    TOTAL GAMES PLAYED: ${fmt(st.totalGames)}${st.buildTime ? `    LAST BUILD: ${fmtBuild(st.buildTime)}` : ''}`;
       $('stats').classList.remove('hidden');
     } catch (e) {
       $('stats').classList.add('hidden');

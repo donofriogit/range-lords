@@ -578,24 +578,22 @@ class Stats:
     def snapshot(self):
         today = time.strftime("%Y-%m-%d", time.gmtime())
         playing = sum(isinstance(c, Client) for r in rooms.values() if r.state for c in r.clients)
-        return {"playingNow": playing, "gamesToday": self.days.get(today, 0), "totalGames": self.total, "version": VERSION}
+        return {"playingNow": playing, "gamesToday": self.days.get(today, 0), "totalGames": self.total, "buildTime": BUILD_TIME}
 
 
-def find_version():
-    """Short git commit hash: Render sets RENDER_GIT_COMMIT; locally ask git (a trailing + means uncommitted changes)."""
-    commit = os.environ.get("RENDER_GIT_COMMIT", "").strip()
-    if commit:
-        return commit[:7]
+def find_build_time():
+    """When the code being served was committed (epoch seconds). Falls back to the age of this file if git is not around."""
     here = os.path.dirname(os.path.abspath(__file__))
     try:
-        run = lambda *a: subprocess.run(["git", *a], cwd=here, capture_output=True, text=True, timeout=5)
-        head = run("rev-parse", "--short=7", "HEAD").stdout.strip()
-        return head + ("+" if head and run("status", "--porcelain").stdout.strip() else "") or "dev"
+        out = subprocess.run(["git", "log", "-1", "--format=%ct", "HEAD"], cwd=here, capture_output=True, text=True, timeout=5).stdout.strip()
+        if out.isdigit():
+            return int(out)
     except (OSError, subprocess.SubprocessError):
-        return "dev"
+        pass
+    return int(os.path.getmtime(os.path.abspath(__file__)))
 
 
-VERSION = find_version()
+BUILD_TIME = find_build_time()
 stats = Stats(STATS_FILE)
 
 rooms = {}
