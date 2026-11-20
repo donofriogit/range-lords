@@ -26,7 +26,8 @@
   let hard = false, cloudsOn = true, divots = [], windMode = 'constant', optionsLocked = false, closedByServer = false;
   let scale = 1.2;                             // backing-store pixels per world unit
   const aim = [{ ...DEFAULT_AIM }, { ...DEFAULT_AIM }];
-  let hist = [[], []];                         // shots each player has fired, oldest first
+  let logFrom = [0, 0];                        // index into hist where the current round's powder log begins
+  let hist = [[], []];                        // shots each player has fired, oldest first
   let chatMsgs = [];                           // recent chat lines, drawn as plain text in the green under your castle
   let localSeat = 0, maskedSeat = -1;          // local game: whose turn to aim, and whose dials are hidden after locking in
   let roundStart = null, roundVolleys = [];    // recording of the round in progress
@@ -70,20 +71,49 @@
 
   // ---------------------------------------------------------------- network
 
+  // A dropped connection mid-game is not the end of it: the server holds the seat for a while, and we keep knocking
+  // with the secret token from the game until it lets us back in (or the time is up).
+  const RECONNECT_MS = 45000;
+  let session = null, reconnecting = false, reconnectUntil = 0, reconnectTimer = null, netNote = '';
+
+  function openSocket(onOpen) {
+    if (ws) { ws.onclose = null; ws.close(); }
+    const sock = ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+    sock.onopen = onOpen;
+    sock.onmessage = (e) => onMessage(JSON.parse(e.data));
+    sock.onclose = (e) => { if (sock === ws) onSocketClosed(e); };
+  }
+
   function connect(onOpen) {
     $('lobbyMsg').textContent = '';
     closedByServer = false;
-    if (ws) { ws.onclose = null; ws.close(); }
-    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
-    ws.onopen = onOpen;
-    ws.onmessage = (e) => onMessage(JSON.parse(e.data));
-    ws.onclose = (e) => {
-      console.warn('socket closed', e.code, e.reason, 'clean:', e.wasClean);
-      setChatEnabled(false);
-      if (closedByServer) return;
-      if (state && !over) { $('left').querySelector('h2').textContent = 'Connection lost'; show('left'); }
-      else if (!state) { $('lobbyMsg').textContent = 'Could not reach the server.'; showLobbyMenu(); }
-    };
+    reconnecting = false; netNote = ''; clearTimeout(reconnectTimer);
+    openSocket(onOpen);
+  }
+
+  function onSocketClosed(e) {
+    console.warn('socket closed', e.code, e.reason, 'clean:', e.wasClean);
+    setChatEnabled(false);
+    if (closedByServer) return;
+    if (state && session) { reconnectSoon(); return; }
+    if (state && !over) { $('left').querySelector('h2').textContent = 'Connection lost'; show('left'); }
+    else if (!state) { $('lobbyMsg').textContent = 'Could not reach the server.'; showLobbyMenu(); }
+  }
+
+  function reconnectSoon() {
+    if (!reconnecting) { reconnecting = true; reconnectUntil = performance.now() + RECONNECT_MS; stopHold(); }
+    netNote = 'Connection lost - trying to reconnect...';
+    syncControls();
+    if (performance.now() > reconnectUntil) return giveUpReconnecting();
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(() => openSocket(() => send({ type: 'rejoin', code: session.code, token: session.token })), 1500);
+  }
+
+  function giveUpReconnecting() {
+    reconnecting = false; netNote = ''; closedByServer = true; clearTimeout(reconnectTimer);
+    if (!over) { $('left').querySelector('h2').textContent = 'Connection lost'; show('left'); }
+    else { $('rematchBtn').disabled = true; $('goText').textContent += '\n(Connection lost)'; }
+    syncControls();
   }
 
   const send = (obj) => ws && ws.readyState === 1 && ws.send(JSON.stringify(obj));
@@ -100,6 +130,7 @@
         break;
       case 'start':
         resetReplay();
+        session = m.code ? { code: m.code, token: m.token } : null;
         you = m.you; state = m.state; score = m.score; round = m.round; target = m.target; mode = m.mode;
         hard = !!m.hard; $('modeSelect').value = hard ? 'hard' : 'easy'; divots = [];
         cloudsOn = m.clouds !== false; $('cloudsSelect').value = cloudsOn ? 'on' : 'off';
@@ -109,10 +140,38 @@
         localSeat = 0; maskedSeat = -1; replayPressed = oppReplay = false;
         roundStart = JSON.parse(JSON.stringify(m.state)); roundVolleys = [];
         if (round === 1) { aim[0] = { ...DEFAULT_AIM }; aim[1] = { ...DEFAULT_AIM }; hist = [[], []]; chatMsgs = []; lastRound = null; }
+        logFrom = [hist[0].length, hist[1].length];   // powder log starts empty each round; hist keeps the full match
         windVis = state.wind;
         hide('lobby'); hide('gameover'); document.body.classList.remove('menu');
         showChat(mode === 'online');
         syncControls();
+        break;
+      case 'resume': {      // back in after a dropped connection: take the server's word for where things stand
+        resetReplay();
+        reconnecting = false; netNote = ''; clearTimeout(reconnectTimer);
+        you = m.you; state = m.state; score = m.score; round = m.round; target = m.target; mode = m.mode;
+        vol = null; trails = []; particles = []; debris = [];
+        firedMe = mode === 'local' ? firedMe : m.fired; oppFired = m.oppFired;
+        roundEnded = m.roundOver; over = m.over; seriesWinner = m.seriesWinner;
+        if (mode === 'local' && !m.pending[0]) { localSeat = 0; maskedSeat = -1; }
+        replayPressed = oppReplay = false;
+        roundStart = JSON.parse(JSON.stringify(m.state)); roundVolleys = [];   // volleys missed while away can't be replayed, so replays start from here
+        banner = m.roundOver && !m.over ? 'Round over - the next round is about to start...' : '';
+        windVis = state.wind;
+        hide('left');
+        showChat(mode === 'online');
+        syncControls();
+        if (over) showGameOver(); else hide('gameover');
+        break;
+      }
+      case 'rejoin_failed':
+        giveUpReconnecting();
+        break;
+      case 'opponent_lost':
+        netNote = 'Opponent disconnected - waiting for them to come back...';
+        break;
+      case 'opponent_back':
+        if (!reconnecting) netNote = '';
         break;
       case 'aim':
         if (mode === 'online' && m.player !== you && !vol && !replaying && !roundEnded && !over) {
@@ -146,6 +205,7 @@
         if (!$('gameover').classList.contains('hidden')) $('goText').textContent += '\n(Opponent wants a rematch)';
         break;
       case 'opponent_left':
+        netNote = '';
         setChatEnabled(false);
         if (!over) { $('left').querySelector('h2').textContent = 'Opponent left'; show('left'); }
         else { $('rematchBtn').disabled = true; $('goText').textContent += '\n(Opponent left)'; }
@@ -375,8 +435,8 @@
 
   // ---------------------------------------------------------------- controls
 
-  const canAim = () => !!state && !over && !roundEnded && !vol && !replaying && !firedMe;
-  const canReplay = () => !!lastRound && !!state && !vol && !replaying && !firedMe && !oppFired && !replayPressed && maskedSeat < 0;
+  const canAim = () => !reconnecting && !!state && !over && !roundEnded && !vol && !replaying && !firedMe;
+  const canReplay = () => !reconnecting && !!lastRound && !!state && !vol && !replaying && !firedMe && !oppFired && !replayPressed && maskedSeat < 0;
   const HOLD = '.arr, .tbtn[data-k]';          // buttons that repeat while held (strip arrows and the touch steppers)
   const setText = (id, t) => { const el = $(id); if (el.textContent !== String(t)) el.textContent = t; };
 
@@ -398,7 +458,7 @@
       else p = hist[i][hist[i].length - (i === you ? 1 : 2)];
       setText('pa' + i, p && !hard ? `prev ${Math.round(p.angle)}°` : '');
       // running log of powder settings, oldest first (a shared screen only shows the side that is aiming)
-      const log = hard || (local && !(i === act && !masked)) ? [] : hist[i].slice(-3).reverse().map((h) => Math.round(h.power));   // newest first, stacked downwards
+      const log = hard || (local && !(i === act && !masked)) ? [] : hist[i].slice(logFrom[i]).slice(-3).reverse().map((h) => Math.round(h.power));   // newest first, stacked downwards
       setText('pp' + i, log.map((v) => v + 'g').join('\n'));
     }
     const on = canAim(), rp = canReplay();
@@ -773,6 +833,7 @@
 
   function drawBanner() {
     if (banner) macBox(banner, 150, 16);
+    if (netNote) macBox(netNote, 44, 12);
     if (replaying) macBox(`REPLAY - round ${lastRound.round} - ${REPLAY_SPEED}x speed`, 14, 12);
   }
 

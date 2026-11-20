@@ -7,6 +7,7 @@ import asyncio
 import base64
 import copy
 import hashlib
+import hmac
 import ipaddress
 import json
 import traceback
@@ -14,6 +15,7 @@ import math
 import mimetypes
 import os
 import random
+import secrets
 import subprocess
 import signal
 import struct
@@ -334,6 +336,7 @@ WAITING_ROOM_TTL = 600                 # seconds before a game nobody joined is 
 IDLE_ROOM_TTL = 1800                   # seconds without any message before a game is closed
 JANITOR_EVERY = 30
 PING_EVERY, READ_TIMEOUT = 40, 120     # websocket keepalive; a silent connection is dropped after READ_TIMEOUT
+RECONNECT_GRACE = 45                   # seconds a dropped player's seat is held open for them to come back
 VOLLEY_SLACK = 0.3                     # seconds a Fire may arrive before the previous volley has finished playing
 
 
@@ -450,6 +453,7 @@ class Client:
         self.room = None
         self.idx = None
         self.closed = False
+        self.left = False                         # said goodbye with a proper close, so there is nothing to wait for
         self.last_chat = 0.0
 
     def send(self, obj):
@@ -486,6 +490,9 @@ class Room:
         self.created = self.touched = time.monotonic()
         self.busy_until = 0.0           # the previous volley is still playing on the clients until then
         self.counted = False            # this match has been added to the stats
+        self.tokens = [secrets.token_hex(16), secrets.token_hex(16)]   # secret each player needs to take their seat back
+        self.lost = [None, None]        # per seat: timer that gives up on a dropped player
+        self.closing = False            # being shut down for good: no waiting for anyone to come back
 
     def start_round(self):
         self.timer = None
@@ -500,7 +507,20 @@ class Room:
         mode = "computer" if self.bot else "local" if self.local else "online"
         for i, cl in enumerate(self.clients):
             cl.send({"type": "start", "you": i, "state": self.state, "windMode": self.wind_mode,
-                     "score": self.score, "round": self.round, "target": self.target, "mode": mode, "hard": self.hard, "clouds": self.clouds})
+                     "score": self.score, "round": self.round, "target": self.target, "mode": mode, "hard": self.hard, "clouds": self.clouds,
+                     "code": self.code, "token": self.tokens[i]})
+
+    def resume_msg(self, idx):
+        """Everything a player who dropped out needs to carry on from where the room is now."""
+        mode = "computer" if self.bot else "local" if self.local else "online"
+        won = [i for i in (0, 1) if self.score[i] >= self.target]
+        winner = (won[0] if len(won) == 1 else -1) if self.over and won else None
+        return {"type": "resume", "you": idx, "state": self.state, "windMode": self.wind_mode, "score": self.score,
+                "round": self.round, "target": self.target, "mode": mode, "hard": self.hard, "clouds": self.clouds,
+                "fired": self.pending[idx] is not None,
+                "oppFired": mode == "online" and self.pending[1 - idx] is not None,
+                "pending": [p is not None for p in self.pending],
+                "roundOver": self.round_over, "over": self.over, "seriesWinner": winner}
 
     def new_match(self):
         self.score, self.round, self.over = [0, 0], 0, False
@@ -709,6 +729,11 @@ def handle_message(client, msg):
         client.room, client.idx = target, 1
         target.new_match()
 
+    elif kind == "rejoin":
+        if room:
+            return client.send({"type": "error", "msg": "Already in a game."})
+        rejoin(client, msg)
+
     elif kind == "fire" and room:
         handle_fire(room, client, msg)
 
@@ -738,21 +763,75 @@ def handle_message(client, msg):
             room.clients[1 - client.idx].send({"type": "rematch_wait"})
 
 
+def close_room(room, leaver):
+    """Shut a room down for good and tell whoever is still connected."""
+    room.closing = True
+    if room.timer:
+        room.timer.cancel()
+        room.timer = None
+    for i, t in enumerate(room.lost):
+        if t:
+            t.cancel()
+            room.lost[i] = None
+    if rooms.pop(room.code, None) is room and room.owner:
+        room.owner.rooms -= 1
+    for cl in room.clients:
+        if cl and cl is not leaver:
+            cl.room = None
+            cl.send({"type": "opponent_left"})
+    leaver.room = None
+
+
+def give_up(room, idx):
+    room.lost[idx] = None
+    if rooms.get(room.code) is room:
+        close_room(room, room.clients[idx])
+
+
 def disconnect(client):
     client.closed = True
     room = client.room
     if not room:
         return
-    if room.timer:
-        room.timer.cancel()
-        room.timer = None
-    if rooms.pop(room.code, None) is room and room.owner:
-        room.owner.rooms -= 1
-    for cl in room.clients:
-        if cl and cl is not client:
-            cl.room = None
-            cl.send({"type": "opponent_left"})
-    client.room = None
+    if room.clients[client.idx] is not client:      # someone else has already taken this seat over
+        client.room = None
+        return
+    if room.state is None or room.closing or client.left:
+        return close_room(room, client)
+    # A game under way: keep the seat for a while so a dropped connection (a phone asleep, a wifi blip) can rejoin.
+    if room.lost[client.idx]:
+        room.lost[client.idx].cancel()
+    room.lost[client.idx] = asyncio.get_running_loop().call_later(RECONNECT_GRACE, give_up, room, client.idx)
+    room.clients[1 - client.idx].send({"type": "opponent_lost", "grace": RECONNECT_GRACE})
+
+
+def rejoin(client, msg):
+    """A returning player proves who they are with the secret token from their game and takes their seat back."""
+    target = rooms.get(str(msg.get("code", "")).strip().upper())
+    token = str(msg.get("token", ""))
+    idx = None
+    if target and not target.closing and target.state is not None:
+        for i in (0, 1):
+            if hmac.compare_digest(token.encode(), target.tokens[i].encode()):
+                idx = i
+    if idx is None:
+        return client.send({"type": "rejoin_failed"})
+    old = target.clients[idx]
+    if isinstance(old, Client) and old is not client:
+        old.closed = True               # still looks connected to us, but the player has moved on: drop it
+        old.room = None
+        try:
+            old.writer.close()
+        except Exception:
+            pass
+    if target.lost[idx]:
+        target.lost[idx].cancel()
+        target.lost[idx] = None
+    target.clients[idx] = client
+    client.room, client.idx = target, idx
+    target.touched = time.monotonic()
+    client.send(target.resume_msg(idx))
+    target.clients[1 - idx].send({"type": "opponent_back"})
 
 
 async def keepalive(writer):
@@ -785,6 +864,7 @@ async def ws_loop(reader, writer, client):
             data[i] ^= mask[i & 3]
 
         if op == 8:
+            client.left = True
             return
         if op == 9:
             writer.write(ws_frame(0xA, bytes(data)))
@@ -920,6 +1000,7 @@ async def handle_connection(reader, writer):
 
 def expire(room):
     waiting = room.clients[1] is None
+    room.closing = True
     for cl in room.clients:
         if isinstance(cl, Client):
             cl.send({"type": "expired", "waiting": waiting})
